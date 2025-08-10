@@ -123,8 +123,11 @@ bun run preview
 ## Architecture
 
 ### Frontend (`src/`)
-- **App.tsx** - Main application component with chat interface
-- **components/ChartsDrawer.tsx** - WebContainer-based Mermaid rendering
+- **App.tsx** - Main application component with chat interface and drawer orchestration
+- **hooks/useMicStreaming.ts** - Microphone capture + Deepgram websocket lifecycle with hotword “send it” support
+- **utils/markdownStream.ts** - Markdown streaming helpers (fence balancing, stabilization)
+- **utils/runnableCode.ts** - Runnable code detection for fenced blocks
+- **components/MermaidDrawer.tsx** - WebContainer-based Mermaid rendering
 - **components/CodeRunDrawer.tsx** - Multi-language code execution
 - **App.css** - Application styling with dark theme
 - **markdown-theme.css** - Custom markdown rendering styles

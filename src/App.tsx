@@ -11,6 +11,9 @@ import './markdown-theme.css'
 import MermaidDrawer from './components/MermaidDrawer'
 import CodeRunDrawer from './components/CodeRunDrawer'
 import { bootWC, writeRunSnippet } from './wc'
+import { useMicStreaming } from './hooks/useMicStreaming'
+import { stabilizeMarkdownForStreaming, hardCloseDanglingFences, stripTrailingFence } from './utils/markdownStream'
+import { scanLatestRunnableCode } from './utils/runnableCode'
 
 type LogItem = { level: 'log' | 'warn' | 'error'; text: string };
 type ChatRole = 'user' | 'assistant'
@@ -22,13 +25,6 @@ export default function App() {
   type ChatMsg = { role: 'user'|'assistant'; text: string }
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [isLoading, setIsLoading] = useState(false)
-  const [micOn, setMicOn] = useState(false)
-  const micStreamRef = useRef<MediaStream | null>(null)
-  const micRecorderRef = useRef<MediaRecorder | null>(null)
-  const dgSocketRef = useRef<WebSocket | null>(null)
-  const micBaseInputRef = useRef<string>('')
-  const micCommittedRef = useRef<string>('')
-  const micInterimRef = useRef<string>('')
   const [logs, setLogs] = useState<LogItem[]>([{ level: 'log', text: 'idle' }])
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [chartsState, setChartsState] = useState({ open: false, code: '' })
@@ -43,6 +39,18 @@ export default function App() {
   const rawMdRef = useRef('')
   const taRef = useRef<HTMLTextAreaElement | null>(null)
   const surfaceRef = useRef<HTMLDivElement | null>(null)
+
+  const { micOn, toggleMic } = useMicStreaming({
+    getDeepgramKey: async () => {
+      const keyRes = await fetch('/api/deepgram-token')
+      const { key } = await keyRes.json()
+      if (!key) throw new Error('Missing Deepgram key')
+      return key
+    },
+    onDisplayChange: (value) => { setInput(value) },
+    onSendHotword: (cleaned) => { queueMicrotask(() => onSend(cleaned)) },
+    getBaselineInput: () => input,
+  })
 
   // Mermaid rendering moved to WebContainers in ChartsDrawer
 
@@ -297,172 +305,15 @@ export default function App() {
     })
   }, [markdown, isLoading])
 
-  async function toggleMic() {
-    if (micOn) {
-      stopMic()
-      setMicOn(false)
-      return
-    }
-    try {
-      const keyRes = await fetch('/api/deepgram-token')
-      const { key } = await keyRes.json()
-      if (!key) throw new Error('Missing Deepgram key')
-      console.log('[mic] requesting user media')
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: { ideal: 1 },
-          noiseSuppression: { ideal: true },
-          echoCancellation: { ideal: true },
-          autoGainControl: { ideal: true },
-          sampleRate: { ideal: 48000 },
-        },
-      })
-      micStreamRef.current = stream
-      const qs = new URLSearchParams({
-        model: 'nova-3',
-        encoding: 'opus',
-        interim_results: 'true',
-        smart_format: 'true',
-        punctuate: 'true',
-        vad_events: 'true',
-        channels: '1',
-        language: 'en-US',
-      })
-      const wsUrl = `wss://api.deepgram.com/v1/listen?${qs.toString()}`
-      console.log('[mic] opening ws', wsUrl)
-      const socket = new WebSocket(wsUrl, ['token', key] as unknown as string)
-      dgSocketRef.current = socket
-      socket.binaryType = 'arraybuffer'
-      socket.onopen = () => {
-        // Capture baseline input at mic start
-        micBaseInputRef.current = input
-        micCommittedRef.current = ''
-        micInterimRef.current = ''
-        const mime = chooseOpusMime()
-        console.log('[mic] ws open; starting recorder with', mime)
-        const rec = new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 128000 })
-        micRecorderRef.current = rec
-        rec.ondataavailable = (e) => {
-          const data = e.data
-          if (data && data.size > 0 && socket.readyState === WebSocket.OPEN) {
-            data.arrayBuffer().then((buf) => {
-              socket.send(buf)
-              console.log('[mic] sent chunk', (buf as ArrayBuffer).byteLength, 'bytes')
-            })
-          }
-        }
-        rec.start(100)
-        setMicOn(true)
-      }
-      socket.onmessage = (ev) => {
-        try {
-          const raw = typeof ev.data === 'string' ? ev.data : ''
-          if (!raw) return
-          const msg = JSON.parse(raw)
-          console.log('[mic] msg', msg?.type || 'Results')
-          // Deepgram typically sends { type: 'Results', channel: { alternatives: [{ transcript, words, ... }] }, is_final }
-          const transcript: string | undefined = msg?.channel?.alternatives?.[0]?.transcript
-          const isFinal: boolean = Boolean(msg?.is_final ?? msg?.speech_finalized)
-          if (!transcript) return
-          console.log('[mic] recv', { len: transcript.length, isFinal })
-          // Maintain committed (final) + interim (non-final) buffers
-          if (isFinal) {
-            micCommittedRef.current = micCommittedRef.current
-              ? micCommittedRef.current + ' ' + transcript
-              : transcript
-            micInterimRef.current = ''
-          } else {
-            micInterimRef.current = transcript
-          }
-          // Compose display: baseline + committed + interim
-          const join = (a: string, b: string) => {
-            const sa = (a || '').trim(); const sb = (b || '').trim();
-            if (!sa) return sb; if (!sb) return sa; return sa + ' ' + sb
-          }
-          let display = join(join(micBaseInputRef.current || '', micCommittedRef.current), micInterimRef.current)
-          display = suppressCommandPhrases(display)
-          if (!isFinal) display = suppressDanglingSendAtEnd(display)
-          if (hasSendHotword(display)) {
-            const cleaned = display.trim()
-            // Send cleaned and reset mic buffers, keep mic running
-            queueMicrotask(() => onSend(cleaned))
-            micBaseInputRef.current = ''
-            micCommittedRef.current = ''
-            micInterimRef.current = ''
-            setInput('')
-          } else {
-            setInput(display)
-          }
-        } catch {
-          // ignore non-JSON or interim messages
-        }
-      }
-      socket.onclose = () => {
-        console.warn('[mic] ws close')
-        stopMic()
-        setMicOn(false)
-      }
-      socket.onerror = (e) => {
-        console.error('[mic] ws error', e)
-        stopMic()
-        setMicOn(false)
-      }
-    } catch (e) {
-      console.error('mic error', (e as any)?.message || String(e))
-      stopMic()
-      setMicOn(false)
-    }
-  }
 
-  function stopMic() {
-    try { micRecorderRef.current?.stop() } catch {/* ignore */}
-    micRecorderRef.current = null
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((t) => t.stop())
-      micStreamRef.current = null
-    }
-    try {
-      if (dgSocketRef.current && dgSocketRef.current.readyState === WebSocket.OPEN) {
-        try { dgSocketRef.current.send(JSON.stringify({ type: 'CloseStream' })) } catch {/* ignore */}
-      }
-      dgSocketRef.current?.close()
-    } catch {/* ignore */}
-    dgSocketRef.current = null
-  }
 
-  function hasSendHotword(text: string): boolean {
-    const t = text.toLowerCase()
-    return /\b(send\s*it|send-it)\b/.test(t)
-  }
 
   // Note: replaced by suppression helpers; keep for future use if needed
 
   // Hide command phrases from the visible input (even if we don't trigger send yet)
-  function suppressCommandPhrases(text: string): string {
-    return text.replace(/\b(send\s*it|send-it)\b/gi, '').replace(/\b(send)\b\s*$/i, '')
-  }
 
   // If interim buffer ends with a dangling 'send' at the end, hide it until finalized
-  function suppressDanglingSendAtEnd(text: string): string {
-    return text.replace(/\b(send)\b\s*$/i, '')
-  }
 
-  function chooseOpusMime(): string {
-    const candidates = [
-      'audio/webm;codecs=opus',
-      'audio/ogg;codecs=opus',
-      'audio/webm',
-    ]
-    for (const m of candidates) {
-      try {
-        // Some environments may not type this, but it exists at runtime
-        if (typeof MediaRecorder !== 'undefined' && (MediaRecorder as any).isTypeSupported?.(m)) return m
-      } catch {
-        // ignore
-      }
-    }
-    return ''
-  }
 
   const mdComponents: any = {
     h1: (p: any) => <h1 className="md-h1" {...p} />,
@@ -681,79 +532,12 @@ export default function App() {
   )
 }
 
-function stabilizeMarkdownForStreaming(raw: string, isFinal: boolean): string {
-  let out = raw
-  // Balance fenced code blocks ```
-  const fenceMatches = out.match(/(^|\n)```/g)
-  if (fenceMatches && fenceMatches.length % 2 === 1 && !isFinal) {
-    out += '\n```'
-  }
-  // Balance inline code backticks ` (ignore escaped \`)
-  const inlineMatches = out.match(/(?<!\\)`/g)
-  if (inlineMatches && inlineMatches.length % 2 === 1 && !isFinal) {
-    out += '`'
-  }
-  return out
-}
-
-// Aggressively close any dangling fenced code blocks in the provided markdown
-function hardCloseDanglingFences(md: string): string {
-  if (!md) return md
-  // Count fenced code ticks ``` occurrences not preceded by 4 backticks
-  const matches = md.match(/(^|\n)```/g)
-  if (matches && matches.length % 2 === 1) {
-    return md + '\n```\n'
-  }
-  // Also close inline single backticks if odd count at end of stream
-  const inline = md.match(/(?<!\\)`/g)
-  if (inline && inline.length % 2 === 1) {
-    return md + '`'
-  }
-  return md
-}
-
-function stripTrailingFence(md: string): string {
-  if (!md) return md
-  // Remove any trailing sequence of backticks at end or on the last line
-  return md.replace(/(```+\s*)+$/m, '').replace(/\n```+\s*$/m, '')
-}
+// markdown helpers moved to ./utils/markdownStream
 
 function limit<T>(arr: T[], n = 30) { return arr.length > n ? arr.slice(arr.length - n) : arr }
 function join(args: unknown[]) { return args.map((a) => (typeof a === 'string' ? a : safe(JSON.stringify(a)))).join(' ') }
 function safe(s: string) { try { return s } catch { return '[unserializable]' } }
 
-// Scan for the last fully closed fenced code block in the string; returns the language and code
-function scanLatestRunnableCode(md: string): { lang: string; code: string } | null {
-  if (!md) return null
-  const lines = md.split(/\r?\n/)
-  let inFence = false
-  let lang = ''
-  let buf: string[] = []
-  let last: { lang: string; code: string } | null = null
-  for (const line of lines) {
-    const trimmed = line.trimStart()
-    if (!inFence && trimmed.startsWith('```')) {
-      lang = trimmed.slice(3).trim().toLowerCase()
-      inFence = true
-      buf = []
-      continue
-    }
-    if (inFence && trimmed.startsWith('```')) {
-      const code = buf.join('\n')
-      last = { lang: lang || 'js', code }
-      inFence = false
-      lang = ''
-      buf = []
-      continue
-    }
-    if (inFence) buf.push(line)
-  }
-  if (!last) return null
-  const l = last.lang
-  if (l === 'mermaid' || l === 'javascript' || l === 'js' || l === 'html' || l === 'python' || l === 'py' || l === 'perl' || l === 'pl') {
-    return last
-  }
-  return null
-}
+// runnable code detection moved to ./utils/runnableCode
 
 // (removed old regex-based extractor)
