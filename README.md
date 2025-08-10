@@ -10,7 +10,7 @@ Thermodynamic is a sophisticated AI-powered research agent featuring a React-bas
 ### 🤖 AI Integration
 - **Claude Sonnet 4** integration with streaming responses
 - **MCP (Model Context Protocol)** server support for extensible tool integration
-- **Custom tools** for stock prices, weather, time, and web search
+- **Custom tools** for stock prices, weather, time, and web search with Tavily or through using the native Anthropic Web Search Beta. 
 - **Persistent system prompts** with Supabase integration
 - **1-hour prompt caching** for improved performance
 
