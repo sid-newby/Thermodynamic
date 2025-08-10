@@ -1,6 +1,28 @@
 # Thermodynamic
 ![thermodynamic](public/thermodynamic.gif)
 
+## Features v Progress
+ [x] Web search
+ [x] 10 step context history 
+ [x] Supabase for state
+ [x] Web Containers
+ [x] Remark GFM
+ [x] React Markdown and Styling 
+ [x] System Prompt Management in the UI 
+ [x] Tavily web search 
+ [x] Deepgram for TTS 
+ [x] MCP Server
+ [x] Bun API 
+ [x] React Syntax Highlighting
+ [x] Independent State for Web Containers - Fuck UseState / UseEffect for real. 
+ [ ] Embedding with OpenAI and Supabase (text-embeddings-small @ 768dim)
+ [ ] Multi-agent editors (Langgraph / Inspired by GPTResearcher)
+ [ ] STT (Cartesia / Websockets)
+ [x] Hot word STT when mic is toggled on 'Send it' ->
+ [ ] Tons of tuneup 
+ [ ] Add more controls to UI Admin (Themes, Voice, MCP Loading)
+
+
 **Advanced Agentic Research Agent with WebContainer Integration**
 
 Thermodynamic is a sophisticated AI-powered research agent featuring a React-based chat interface that communicates with Claude via Anthropic's API. The system supports streaming responses, tool usage, MCP server integration, real-time console logging, WebContainer-based code execution, and automatic Mermaid diagram rendering.

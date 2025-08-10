@@ -54,15 +54,20 @@ export function CodeRunDrawer({
         }
         try {
           if (clientId) await mod.auth?.init?.({ clientId, scope: '' })
-        } catch {
+        } catch (e) {
           // ignore auth init errors
+          console.warn('Failed to init WebContainer auth', e)
         }
         cache.api = mod
       }
       const { WebContainer } = cache.api!
       if (!cache.wc) {
         setBooting(true)
-        cache.wc = await WebContainer.boot({ workdirName: 'code-runner' })
+        cache.wc = await WebContainer.boot({ workdirName: 'code-runner', coep: 'credentialless', forwardPreviewErrors: 'exceptions-only' })
+        // Surface preview exceptions to parent console and internal errors/ports
+        cache.wc.on('preview-message', (msg: unknown) => { try { console.error('[code-runner preview]', msg) } catch {/* ignore */} })
+        cache.wc.on('error', (err: { message: string }) => { try { console.error('[code-runner wc error]', err); setError(err?.message || String(err)) } catch {/* ignore */} })
+        cache.wc.on('port', (port: number, type: 'open' | 'close', url: string) => { try { console.log('[code-runner wc port]', port, type, url) } catch {/* ignore */} })
         // Write static assets
         await cache.wc.fs.writeFile('server.js', SERVER_JS)
         // Add a tiny index fallback to ensure the server responds quickly
@@ -85,18 +90,10 @@ export function CodeRunDrawer({
           .catch(() => {})
       }
 
-      // Initial files
-      await writeFilesForLanguage(cache.wc!, language, latestCodeRef.current)
-      if (cache.serverUrl) setIframeUrl(urlWithBust(cache.serverUrl))
-      else {
-        // Wait briefly for server-ready and set iframe once URL is available
-        const stopAt = Date.now() + 3000
-        const t = setInterval(() => {
-          if (cache.serverUrl || Date.now() > stopAt) {
-            clearInterval(t)
-            if (cache.serverUrl) setIframeUrl(urlWithBust(cache.serverUrl))
-          }
-        }, 50)
+      // If we have a server, ensure files are written and iframe is set
+      if (cache.wc && cache.serverUrl) {
+        await writeFilesForLanguage(cache.wc, language, latestCodeRef.current)
+        setIframeUrl(urlWithBust(cache.serverUrl))
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -118,14 +115,8 @@ export function CodeRunDrawer({
     if (!open || !wc) return
     ;(async () => {
       try {
-        // Clear previous files to avoid stale content
-        try { await wc.fs.rm('index.html') } catch {}
-        try { await wc.fs.rm('snippet.js') } catch {}
-        try { await wc.fs.rm('snippet.py') } catch {}
         await writeFilesForLanguage(wc, language, latestCodeRef.current)
         if (url) setIframeUrl(urlWithBust(url))
-        // Explicitly reload iframe by adding a dummy hash change if needed
-        setTimeout(() => { if (url) setIframeUrl(urlWithBust(url)) }, 50)
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
       }
@@ -204,8 +195,9 @@ async function writeFilesForLanguage(
     return
   }
   if (lang === 'html' || code.trim().startsWith('<!doctype') || code.trim().startsWith('<html')) {
-    // Use provided HTML as-is; inject console capture via a lightweight shim if missing
-    await wc.fs.writeFile('index.html', ensureConsoleShimInHtml(code))
+    // Use provided HTML; ensure console shim and force a cache-busting noop
+    const html = ensureConsoleShimInHtml(code)
+    await wc.fs.writeFile('index.html', html)
     return
   }
   // Default to JS module executed in the browser
@@ -265,7 +257,7 @@ const server = createServer(async (req, res) => {
     const u = new URL(req.url || '/', 'http://wc.local');
     const path = u.pathname;
     if (path === '/' || path === '/index.html') {
-      const html = await readFile('index.html', 'utf8').catch(() => '');
+      const html = await readFile('index.html', 'utf8').catch(() => '<!doctype html><html><body><div>Loading…</div></body></html>');
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
@@ -328,14 +320,15 @@ const INDEX_HTML_PY = `<!doctype html>
         ['log','warn','error'].forEach(k=>{const orig=console[k];console[k]=(...a)=>{try{write(k,a)}catch{};orig.apply(console,a)};});
       })();
     </script>
+    <!-- Load non-module build to avoid module parse issues -->
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
     <script type="module">
-      import { loadPyodide } from 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.mjs';
       const status = document.getElementById('status');
       self.addEventListener('error', (e) => { try { status.textContent = 'JS Error: ' + (e?.message || e); } catch {} });
       self.addEventListener('unhandledrejection', (e) => { try { status.textContent = 'Promise Rejection: ' + (e?.reason?.message || e?.reason || 'unknown'); } catch {} });
       try {
         status.textContent = 'Loading Pyodide…';
-        const pyodide = await loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/' });
+        const pyodide = await (window as any).loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/' });
         status.textContent = 'Loaded. Running snippet…';
         const code = await fetch('/snippet.py', { cache: 'no-store' }).then(r => r.text());
         // Capture stdout/stderr
@@ -361,5 +354,3 @@ const INDEX_HTML_PY = `<!doctype html>
   </html>`
 
 export default CodeRunDrawer
-
-

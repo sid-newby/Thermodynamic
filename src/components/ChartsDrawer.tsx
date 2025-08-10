@@ -50,8 +50,9 @@ export function ChartsDrawer({ open, onClose, code }: { open: boolean; onClose: 
           if (clientId) {
             await mod.auth?.init?.({ clientId, scope: '' })
           }
-        } catch {
+        } catch (e) {
           // ignore auth init errors; may not be required in dev
+          console.warn('Failed to init WebContainer auth', e)
         }
         cache.api = mod
       }
@@ -59,7 +60,7 @@ export function ChartsDrawer({ open, onClose, code }: { open: boolean; onClose: 
       // Boot container once
       if (!cache.wc) {
         setBooting(true)
-        cache.wc = await WebContainer.boot({ workdirName: 'mermaid-renderer' })
+        cache.wc = await WebContainer.boot({ workdirName: 'mermaid-renderer', coep: 'credentialless', forwardPreviewErrors: 'exceptions-only' })
         // Fetch theme config (variables + css) from backend
         let variables: Record<string, unknown> | undefined
         let css: string | undefined
@@ -70,12 +71,19 @@ export function ChartsDrawer({ open, onClose, code }: { open: boolean; onClose: 
             variables = (json && typeof json.variables === 'object') ? json.variables : undefined
             css = typeof json?.css === 'string' ? json.css : undefined
           }
-        } catch {}
+        } catch {
+          // ignore
+        }
         // Prepare minimal files (no npm install required)
         await cache.wc.fs.writeFile('index.html', buildIndexHtml(variables, css))
         await cache.wc.fs.writeFile('main.mjs', MAIN_JS)
         await cache.wc.fs.writeFile('diagram.mmd', latestCodeRef.current || 'graph TD; A[Empty] --> B[Diagram]')
         await cache.wc.fs.writeFile('server.js', SERVER_JS)
+
+        // Surface preview/internal errors
+        cache.wc.on('preview-message', (msg: unknown) => { try { console.error('[charts preview]', msg) } catch {/* ignore */} })
+        cache.wc.on('error', (err: { message: string }) => { try { console.error('[charts wc error]', err); setError(err?.message || String(err)) } catch {/* ignore */} })
+        cache.wc.on('port', (port: number, type: 'open' | 'close', url: string) => { try { console.log('[charts wc port]', port, type, url) } catch {/* ignore */} })
 
         // Start server
         const proc = await cache.wc.spawn('node', ['server.js'])
@@ -93,28 +101,6 @@ export function ChartsDrawer({ open, onClose, code }: { open: boolean; onClose: 
             },
           }),
         ).catch(() => {})
-      }
-
-      // Always sync the current diagram and html on open to avoid stale renders
-      if (cache.wc) {
-        try { await cache.wc.fs.rm('diagram.mmd') } catch {}
-        await cache.wc.fs.writeFile('diagram.mmd', latestCodeRef.current || '')
-        // Rewrite index.html as well, ensuring a fresh script execution path
-        try { await cache.wc.fs.rm('index.html') } catch {}
-        // Re-fetch theme in case it changed
-        let variables: Record<string, unknown> | undefined
-        let css: string | undefined
-        try {
-          const res = await fetch('/api/mermaid-theme')
-          if (res.ok) {
-            const json = await res.json()
-            variables = (json && typeof json.variables === 'object') ? json.variables : undefined
-            css = typeof json?.css === 'string' ? json.css : undefined
-          }
-        } catch {}
-        await cache.wc.fs.writeFile('index.html', buildIndexHtml(variables, css))
-        try { await cache.wc.fs.rm('main.mjs') } catch {}
-        await cache.wc.fs.writeFile('main.mjs', MAIN_JS)
       }
 
       // If we already have a server URL, just use it
@@ -143,7 +129,7 @@ export function ChartsDrawer({ open, onClose, code }: { open: boolean; onClose: 
     ;(async () => {
       try {
         // Clear and re-write diagram to avoid stale cache in iframe
-        try { await wc.fs.rm('diagram.mmd') } catch {}
+        try { await wc.fs.rm('diagram.mmd') } catch { /* ignore */ }
         await wc.fs.writeFile('diagram.mmd', latestCodeRef.current || '')
         if (url) setIframeUrl(urlWithBust(url))
       } catch (e) {
@@ -262,7 +248,7 @@ const server = createServer(async (req, res) => {
     const u = new URL(req.url || '/', 'http://wc.local');
     const path = u.pathname;
     if (path === '/' || path === '/index.html') {
-      const html = await readFile('index.html', 'utf8');
+      const html = await readFile('index.html', 'utf8').catch(() => '<!doctype html><html><body><div>Loading…</div></body></html>');
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
@@ -273,13 +259,23 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (path === '/diagram.mmd') {
-      const mmd = await readFile('diagram.mmd', 'utf8');
+      const mmd = await readFile('diagram.mmd', 'utf8').catch(() => '');
       res.writeHead(200, {
         'content-type': 'text/plain; charset=utf-8',
         'cache-control': 'no-store',
         'Cross-Origin-Resource-Policy': 'cross-origin',
       });
       res.end(mmd);
+      return;
+    }
+    if (path === '/main.mjs') {
+      const js = await readFile('main.mjs', 'utf8');
+      res.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+        'Cross-Origin-Resource-Policy': 'cross-origin',
+      });
+      res.end(js);
       return;
     }
     if (path === '/favicon.ico') {
@@ -365,4 +361,3 @@ try {
 } catch (e) {
   el.textContent = 'Failed to render: ' + (e?.message || e);
 }`
-

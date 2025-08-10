@@ -264,8 +264,11 @@ try {
 }
 
 // Minimal Bun API for UI
+const IDLE_S = Math.min(255, Math.max(1, Number(process.env.IDLE_TIMEOUT_S || 255)));
 Bun.serve({
   port: Number(process.env.PORT || 3000),
+  // Keep SSE connections stable during dev (seconds; Bun caps at 255)
+  idleTimeout: IDLE_S,
   async fetch(req) {
     const url = new URL(req.url);
     // Expose Deepgram key for browser WebSocket auth (dev-only). Do NOT use this in production as-is.
@@ -344,24 +347,32 @@ Bun.serve({
         const encoder = (s: string) => new TextEncoder().encode(s);
         const sse = new ReadableStream<Uint8Array>({
           start(controller) {
+            let closed = false
             controller.enqueue(encoder(`event: message\n`));
             // send initial echo of user message to populate pane with a header line
             controller.enqueue(encoder(`data: ${JSON.stringify({ type: "text", text: "" })}\n\n`));
             stream.on("text", (t: string) => {
-              controller.enqueue(encoder(`data: ${JSON.stringify({ type: "text", text: t })}\n\n`));
+              if (closed) return
+              try { controller.enqueue(encoder(`data: ${JSON.stringify({ type: "text", text: t })}\n\n`)); } catch {}
             });
             stream.on("streamEvent", (ev: any) => {
-              if (ev?.type === "content_block_start") {
-                const nm = ev?.content_block?.name;
-                if (nm) controller.enqueue(encoder(`data: ${JSON.stringify({ type: "tool", name: nm })}\n\n`));
-              }
+              if (closed) return
+              try {
+                if (ev?.type === "content_block_start") {
+                  const nm = ev?.content_block?.name;
+                  if (nm) controller.enqueue(encoder(`data: ${JSON.stringify({ type: "tool", name: nm })}\n\n`));
+                }
+              } catch {}
             });
             stream.on("finalMessage", () => {
-              controller.enqueue(encoder(`data: ${JSON.stringify({ type: "done" })}\n\n`));
-              controller.close();
+              if (closed) return
+              try { controller.enqueue(encoder(`data: ${JSON.stringify({ type: "done" })}\n\n`)); } catch {}
+              try { controller.close(); } catch {}
+              closed = true
             });
             stream.on("error", (e: any) => {
-              controller.enqueue(encoder(`data: ${JSON.stringify({ type: "error", message: String(e?.message || e) })}\n\n`));
+              if (closed) return
+              try { controller.enqueue(encoder(`data: ${JSON.stringify({ type: "error", message: String(e?.message || e) })}\n\n`)); } catch {}
             });
           },
         });

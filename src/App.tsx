@@ -18,6 +18,8 @@ type ChatMessage = { role: ChatRole; content: string }
 export default function App() {
   const [input, setInput] = useState('')
   const [markdown, setMarkdown] = useState('')
+  type ChatMsg = { role: 'user'|'assistant'; text: string }
+  const [messages, setMessages] = useState<ChatMsg[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [micOn, setMicOn] = useState(false)
   const micStreamRef = useRef<MediaStream | null>(null)
@@ -28,11 +30,8 @@ export default function App() {
   const micInterimRef = useRef<string>('')
   const [logs, setLogs] = useState<LogItem[]>([{ level: 'log', text: 'idle' }])
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [chartsOpen, setChartsOpen] = useState(false)
-  const [chartsCode, setChartsCode] = useState('')
-  const [runOpen, setRunOpen] = useState(false)
-  const [runCode, setRunCode] = useState('')
-  const [runLang, setRunLang] = useState('')
+  const [chartsState, setChartsState] = useState({ open: false, code: '' })
+  const [runState, setRunState] = useState({ open: false, code: '', language: '' })
   const [systemPrompt, setSystemPrompt] = useState('')
   const [saving, setSaving] = useState(false)
   const [mermaidVars, setMermaidVars] = useState<string>('')
@@ -57,31 +56,40 @@ export default function App() {
   }, [])
 
   const canSend = input.trim().length > 0 && !isLoading
-  // Detect mermaid blocks in markdown and open Charts drawer automatically
+  // Detect mermaid blocks in markdown and open Charts drawer automatically (parser-based)
   const lastMermaidRef = useRef<string>('')
+  const chartsAutoRef = useRef<boolean>(false)
   useEffect(() => {
-    const m = extractLatestMermaid(markdown)
+    const tail = tailSection(markdown)
+    const m = scanLatestMermaid(tail)
     if (m && m !== lastMermaidRef.current) {
       lastMermaidRef.current = m
-      setChartsCode(m)
-      setChartsOpen(true)
-    }
-  }, [markdown])
-
-  // Detect runnable code blocks (js/html/python) and auto-open CodeRun drawer
-  const lastCodeSigRef = useRef<string>('')
-  useEffect(() => {
-    const latest = extractLatestRunnableCode(markdown)
-    if (latest) {
-      const sig = `${latest.lang}\n${latest.code}`
-      if (sig !== lastCodeSigRef.current) {
-        lastCodeSigRef.current = sig
-        setRunLang(latest.lang)
-        setRunCode(latest.code)
-        setRunOpen(true)
+      chartsAutoRef.current = true
+      setChartsState({ open: true, code: m })
+    } else if (!m && chartsState.open) {
+      // No mermaid present in latest markdown; close charts to avoid stale renders
+      if (chartsAutoRef.current) {
+        lastMermaidRef.current = ''
+        chartsAutoRef.current = false
+        setChartsState({ open: false, code: '' })
       }
     }
-  }, [markdown])
+  }, [markdown, chartsState.open])
+
+  // On-demand code execution; no longer auto-opens drawer
+  // const lastCodeSigRef = useRef<string>('')
+  // useEffect(() => {
+  //   const latest = scanLatestRunnableCode(tailSection(markdown))
+  //   if (latest) {
+  //     const sig = `${latest.lang}\n${latest.code}`
+  //     if (sig !== lastCodeSigRef.current) {
+  //       lastCodeSigRef.current = sig
+  //       setRunState({ open: true, code: latest.code, language: latest.lang })
+  //     }
+  //   }
+  // }, [markdown])
+
+  // (old regex-based detector removed)
 
   useEffect(() => { autoResize() }, [input])
   useEffect(() => { autoResize() }, [])
@@ -162,6 +170,14 @@ export default function App() {
   }, [])
 
   async function onSend(forcedText?: string) {
+  // Before starting a new turn, strip any trailing fence ticks from the end of the accumulated buffer
+  if (rawMdRef.current) {
+    const stripped = stripTrailingFence(rawMdRef.current)
+    if (stripped !== rawMdRef.current) {
+      rawMdRef.current = stripped
+      setMarkdown(stabilizeMarkdownForStreaming(stripped, true))
+    }
+  }
     const textToSend = forcedText ?? input
     if (textToSend.trim().length === 0 || isLoading) return
     setIsLoading(true)
@@ -172,9 +188,8 @@ export default function App() {
     // Echo the user's message into the main pane before streaming
     // Add a blank line after the assistant header so streamed text starts as a paragraph
     {
-      const header = `${rawMdRef.current ? rawMdRef.current + '\n\n' : ''}**You:** ${userText}\n\n### **Thermodynamic**\n\n`
-      rawMdRef.current = header
-      setMarkdown(header)
+      const safeUser = stripTrailingFence(userText)
+      setMessages((prev) => [...prev, { role: 'user', text: safeUser }])
     }
     try {
       console.log('[send]', userText)
@@ -190,14 +205,22 @@ export default function App() {
       let buf = ''
       setInput('')
       let assistantText = ''
+      // Start a new assistant message entry for this turn
+      setMessages((prev) => [...prev, { role: 'assistant', text: '' }])
       const scheduleFlush = () => {
         if (flushTimerRef.current != null) return
         flushTimerRef.current = window.setTimeout(() => {
           if (streamBufRef.current) {
-            const nextRaw = rawMdRef.current + streamBufRef.current
-            rawMdRef.current = nextRaw
-            const safe = stabilizeMarkdownForStreaming(nextRaw, false)
-            setMarkdown(safe)
+            // Append streamed chunk into the last assistant message only
+            const chunk = streamBufRef.current
+            setMessages((prev) => {
+              const next = prev.slice()
+              const idx = next.length - 1
+              if (idx >= 0 && next[idx]?.role === 'assistant') {
+                next[idx] = { role: 'assistant', text: next[idx].text + chunk }
+              }
+              return next
+            })
             streamBufRef.current = ''
           }
           flushTimerRef.current = null
@@ -206,10 +229,15 @@ export default function App() {
       const flushNow = () => {
         if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null }
         if (streamBufRef.current) {
-          const nextRaw = rawMdRef.current + streamBufRef.current
-          rawMdRef.current = nextRaw
-          const safe = stabilizeMarkdownForStreaming(nextRaw, true)
-          setMarkdown(safe)
+          const chunk = streamBufRef.current
+          setMessages((prev) => {
+            const next = prev.slice()
+            const idx = next.length - 1
+            if (idx >= 0 && next[idx]?.role === 'assistant') {
+              next[idx] = { role: 'assistant', text: next[idx].text + chunk }
+            }
+            return next
+          })
           streamBufRef.current = ''
         }
       }
@@ -233,9 +261,16 @@ export default function App() {
           } else if (payload.type === 'error') {
             console.error(payload.message)
           } else if (payload.type === 'done') {
-            // force re-render if empty
             flushNow()
-            setMarkdown((m) => m || '')
+            // Close any dangling fences inside the last assistant message only
+            setMessages((prev) => {
+              const next = prev.slice()
+              const idx = next.length - 1
+              if (idx >= 0 && next[idx]?.role === 'assistant') {
+                next[idx] = { role: 'assistant', text: hardCloseDanglingFences(next[idx].text) }
+              }
+              return next
+            })
             if (assistantText.trim()) {
               setHistory((h) => [...h, { role: 'assistant', content: assistantText }])
             }
@@ -384,7 +419,7 @@ export default function App() {
   }
 
   function stopMic() {
-    try { micRecorderRef.current?.stop() } catch {}
+    try { micRecorderRef.current?.stop() } catch {/* ignore */}
     micRecorderRef.current = null
     if (micStreamRef.current) {
       micStreamRef.current.getTracks().forEach((t) => t.stop())
@@ -392,10 +427,10 @@ export default function App() {
     }
     try {
       if (dgSocketRef.current && dgSocketRef.current.readyState === WebSocket.OPEN) {
-        try { dgSocketRef.current.send(JSON.stringify({ type: 'CloseStream' })) } catch {}
+        try { dgSocketRef.current.send(JSON.stringify({ type: 'CloseStream' })) } catch {/* ignore */}
       }
       dgSocketRef.current?.close()
-    } catch {}
+    } catch {/* ignore */}
     dgSocketRef.current = null
   }
 
@@ -426,7 +461,9 @@ export default function App() {
       try {
         // Some environments may not type this, but it exists at runtime
         if (typeof MediaRecorder !== 'undefined' && (MediaRecorder as any).isTypeSupported?.(m)) return m
-      } catch {}
+      } catch {
+        // ignore
+      }
     }
     return ''
   }
@@ -456,9 +493,7 @@ export default function App() {
                 <button
                   className="md-code-run"
                   onClick={() => {
-                    setRunLang(match![1])
-                    setRunCode(codeString)
-                    setRunOpen(true)
+                    setRunState({ open: true, code: codeString, language: match![1] })
                   }}
                   aria-label="Run in WebContainer"
                   title="Run in WebContainer"
@@ -475,9 +510,7 @@ export default function App() {
                 <button
                   className="md-code-run"
                   onClick={() => {
-                    setRunLang(match![1])
-                    setRunCode(codeString)
-                    setRunOpen(true)
+                    setRunState({ open: true, code: codeString, language: match![1] })
                   }}
                   aria-label="Run in WebContainer"
                   title="Run in WebContainer"
@@ -502,7 +535,7 @@ export default function App() {
       <header className="app__header">
         <div className="app__title">Thermodynamic</div>
         <div className="header__actions">
-          <button className="icon-btn" aria-label="WebContainers" onClick={() => setChartsOpen((v) => !v)}>
+          <button className="icon-btn" aria-label="WebContainers" onClick={() => setChartsState((s) => ({ ...s, open: !s.open }))}>
             <Box size={16} />
           </button>
           <button className="icon-btn" aria-label="Settings" onClick={() => setDrawerOpen(true)}>⚙️</button>
@@ -520,14 +553,16 @@ export default function App() {
       </div>
 
       <main className="surface" ref={surfaceRef}>
-        {markdown ? (
+        {messages.length ? (
           <div className="prose">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={mdComponents}
-            >
-              {markdown}
-            </ReactMarkdown>
+            {messages.map((m, i) => (
+              <div key={i} style={{ marginBottom: 16 }}>
+                <div className="md-p"><strong>{m.role === 'user' ? 'You' : 'Thermodynamic'}</strong>:</div>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                  {m.text}
+                </ReactMarkdown>
+              </div>
+            ))}
           </div>
         ) : (
           <div className="placeholder">Enter a query to begin.</div>
@@ -635,8 +670,8 @@ export default function App() {
       </AnimatePresence>
 
       {/* Charts Drawer */}
-      <ChartsDrawer open={chartsOpen} onClose={() => setChartsOpen(false)} code={chartsCode} />
-      <CodeRunDrawer open={runOpen} onClose={() => setRunOpen(false)} code={runCode} language={runLang} />
+      <ChartsDrawer open={chartsState.open} onClose={() => setChartsState({ open: false, code: '' })} code={chartsState.code} />
+      <CodeRunDrawer open={runState.open} onClose={() => setRunState({ open: false, code: '', language: '' })} code={runState.code} language={runState.language} />
     </div>
   )
 }
@@ -656,29 +691,66 @@ function stabilizeMarkdownForStreaming(raw: string, isFinal: boolean): string {
   return out
 }
 
+// Aggressively close any dangling fenced code blocks in the provided markdown
+function hardCloseDanglingFences(md: string): string {
+  if (!md) return md
+  // Count fenced code ticks ``` occurrences not preceded by 4 backticks
+  const matches = md.match(/(^|\n)```/g)
+  if (matches && matches.length % 2 === 1) {
+    return md + '\n```\n'
+  }
+  // Also close inline single backticks if odd count at end of stream
+  const inline = md.match(/(?<!\\)`/g)
+  if (inline && inline.length % 2 === 1) {
+    return md + '`'
+  }
+  return md
+}
+
+function stripTrailingFence(md: string): string {
+  if (!md) return md
+  // Remove any trailing sequence of backticks at end or on the last line
+  return md.replace(/(```+\s*)+$/m, '').replace(/\n```+\s*$/m, '')
+}
+
 function limit<T>(arr: T[], n = 30) { return arr.length > n ? arr.slice(arr.length - n) : arr }
 function join(args: unknown[]) { return args.map((a) => (typeof a === 'string' ? a : safe(JSON.stringify(a)))).join(' ') }
 function safe(s: string) { try { return s } catch { return '[unserializable]' } }
 
-function extractLatestMermaid(md: string): string | null {
+function scanLatestMermaid(md: string): string | null {
   if (!md) return null
-  const re = /```mermaid\n([\s\S]*?)\n```/g
-  let match: RegExpExecArray | null
+  const lines = md.split(/\r?\n/)
+  let inFence = false
+  let lang = ''
+  let buf: string[] = []
   let last: string | null = null
-  while ((match = re.exec(md)) !== null) {
-    last = match[1]
+  for (const line of lines) {
+    const trimmed = line.trimStart()
+    if (!inFence && trimmed.startsWith('```')) {
+      lang = trimmed.slice(3).trim().toLowerCase()
+      inFence = true
+      buf = []
+      continue
+    }
+    if (inFence && trimmed.startsWith('```')) {
+      if (lang === 'mermaid') last = buf.join('\n')
+      inFence = false
+      lang = ''
+      buf = []
+      continue
+    }
+    if (inFence) buf.push(line)
   }
   return last
 }
 
-function extractLatestRunnableCode(md: string): { lang: string; code: string } | null {
-  if (!md) return null
-  // Match fenced code blocks ```lang\n...\n```; capture language and content
-  const re = /```(js|javascript|html|python|py)\n([\s\S]*?)\n```/gi
-  let match: RegExpExecArray | null
-  let last: { lang: string; code: string } | null = null
-  while ((match = re.exec(md)) !== null) {
-    last = { lang: match[1].toLowerCase(), code: match[2] }
-  }
-  return last
+function tailSection(md: string): string {
+  if (!md) return ''
+  const thermIdx = md.lastIndexOf('\n\n### **Thermodynamic**\n\n')
+  if (thermIdx !== -1) return md.slice(thermIdx)
+  const youIdx = md.lastIndexOf('**You:**')
+  if (youIdx !== -1) return md.slice(youIdx)
+  return md
 }
+
+// (removed old regex-based extractor)
