@@ -1,0 +1,173 @@
+:root { color-scheme: dark; }
+
+.app {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 16px;
+  height: 100vh;
+  padding: 16px;
+  background: #0a0a0a;
+  color: #e5e5e5;
+}
+
+.app__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app__title { font-size: 14px; color: #9ca3af; }
+
+.icon-btn {
+  background: transparent;
+  border: 1px solid #27272a;
+  color: #e5e5e5;
+  border-radius: 8px;
+  width: 32px; height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  line-height: 0;
+}
+
+.header__actions { display: flex; align-items: center; gap: 8px; }
+
+.ticker {
+  overflow: hidden;
+  border-radius: 6px;
+  background: rgba(23,23,23,0.8);
+  border: 1px solid #1f2937;
+}
+.ticker__content {
+  white-space: nowrap;
+  padding: 4px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+/* Ticker log level colors */
+.log { color: #9ca3af; }
+.log--warn { color: #f59e0b; }
+.log--error { color: #ef4444; }
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+@media (min-width: 1024px) {
+  .layout { grid-template-columns: 420px minmax(0, 1fr); }
+}
+
+.panel, .surface {
+  border: 1px solid #1f2937;
+  background: #0b0b0b;
+  border-radius: 10px;
+  padding: 16px;
+}
+
+/* Make main content scroll inside the viewport; don't push the page */
+.surface { min-height: 0; overflow: auto; padding-bottom: 160px; }
+
+.stack { display: grid; gap: 12px; }
+.row { display: flex; gap: 8px; align-items: center; }
+
+.input {
+  height: 40px;
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #27272a;
+  background: #111827;
+  color: #e5e5e5;
+  padding: 0 12px;
+  outline: none;
+}
+.input::placeholder { color: #6b7280; }
+.input:focus { box-shadow: 0 0 0 2px rgba(156, 163, 175, 0.4); }
+
+.btn {
+  height: 36px; padding: 0 16px;
+  border-radius: 8px; border: 1px solid transparent;
+  background: #e5e5e5; color: #111827; font-weight: 600;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn--outline { background: transparent; color: #e5e5e5; border-color: #374151; }
+
+.placeholder { height: 100%; display: grid; place-items: center; color: #6b7280; font-size: 14px; }
+
+.prose { white-space: pre-wrap; font-size: 14px; line-height: 1.6; }
+
+/* Composer at bottom */
+.composer {
+  position: fixed;
+  left: 16px; right: 16px; bottom: 16px;
+  display: flex; gap: 8px; align-items: flex-end;
+  border: 1px solid #1f2937; background: #0b0b0b; border-radius: 12px; padding: 8px;
+}
+.composer__input {
+  flex: 1; resize: none; min-height: 0; max-height: 72px; overflow-y: hidden; line-height: 20px;
+  border: 1px solid #27272a; background: #111827; color: #e5e5e5; border-radius: 8px; padding: 6px 12px; outline: none;
+}
+.composer__input::placeholder { color: #6b7280; }
+.composer__input:focus { box-shadow: 0 0 0 2px rgba(156, 163, 175, 0.4); }
+.composer__icon {
+  width: 36px; height: 36px; display: grid; place-items: center; border-radius: 8px; line-height: 0; padding: 0;
+  border: 1px solid #374151; background: transparent; color: #e5e5e5;
+}
+.composer__icon[disabled] { opacity: 0.5; cursor: not-allowed; }
+.composer__icon--recording { border-color: #b91c1c; box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.35) inset; color: #ef4444; }
+
+/* Drawer */
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  width: 80vw;
+  background: #0b0b0b;
+  border-left: 1px solid #ffffff;
+  outline: 1px solid #ffffff;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.drawer__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #1f2937;
+}
+
+.drawer__title { font-size: 14px; color: #9ca3af; }
+
+.drawer__body { padding: 16px; overflow: auto; }
+
+.textarea {
+  width: 100%;
+  min-height: 240px;
+  border-radius: 8px;
+  border: 1px solid #27272a;
+  background: #111827;
+  color: #e5e5e5;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  resize: vertical;
+}
+
+.drawer__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid #1f2937;
+}

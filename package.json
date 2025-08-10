@@ -1,0 +1,62 @@
+{
+  "name": "thermodynamic",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "api": "bun run claude.ts",
+    "web": "vite",
+    "dev": "concurrently -k -r -n API,WEB -c green.bold,cyan.bold \"bun run claude.ts\" \"vite\"",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@radix-ui/react-icons": "^1.3.2",
+    "@radix-ui/themes": "^3.2.1",
+    "@tailwindcss/vite": "^4.1.11",
+    "@types/mermaid": "^9.2.0",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@webcontainer/api": "^1.6.1",
+    "autoprefixer": "^10.4.21",
+    "floating-ui": "^5.2.8",
+    "framer-motion": "^12.23.12",
+    "lucide-react": "^0.539.0",
+    "mdx": "^0.3.1",
+    "mermaid": "^11.9.0",
+    "npm": "^11.5.2",
+    "postcss": "^8.5.6",
+    "radix-ui": "^1.4.2",
+    "react": "^19.1.1",
+    "react-animate": "^3.0.0",
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "react-syntax-highlighter": "^15.6.1",
+    "remark-gfm": "^4.0.1",
+    "tailwindcss": "^4.1.11"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.59.0",
+    "@supabase/supabase-js": "^2.54.0",
+    "dotenv": "^17.2.1",
+    "tavily": "^1.0.2",
+    "tavily-mcp": "^0.2.9",
+    "concurrently": "^9.2.0",
+    "@eslint/js": "^9.32.0",
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react-swc": "^3.11.0",
+    "eslint": "^9.32.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.3.0",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.39.0",
+    "vite": "^7.1.0"
+  },
+  "trustedDependencies": [
+    "@swc/core",
+    "@tailwindcss/oxide",
+    "esbuild"
+  ]
+}
