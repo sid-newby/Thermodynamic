@@ -65,6 +65,8 @@ export function CodeRunDrawer({
         cache.wc = await WebContainer.boot({ workdirName: 'code-runner' })
         // Write static assets
         await cache.wc.fs.writeFile('server.js', SERVER_JS)
+        // Add a tiny index fallback to ensure the server responds quickly
+        await cache.wc.fs.writeFile('index.html', '<!doctype html><html><body><div id="app"></div></body></html>')
         // Start server
         const proc = await cache.wc.spawn('node', ['server.js'])
         cache.process = proc
@@ -86,6 +88,16 @@ export function CodeRunDrawer({
       // Initial files
       await writeFilesForLanguage(cache.wc!, language, latestCodeRef.current)
       if (cache.serverUrl) setIframeUrl(urlWithBust(cache.serverUrl))
+      else {
+        // Wait briefly for server-ready and set iframe once URL is available
+        const stopAt = Date.now() + 3000
+        const t = setInterval(() => {
+          if (cache.serverUrl || Date.now() > stopAt) {
+            clearInterval(t)
+            if (cache.serverUrl) setIframeUrl(urlWithBust(cache.serverUrl))
+          }
+        }, 50)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -112,6 +124,8 @@ export function CodeRunDrawer({
         try { await wc.fs.rm('snippet.py') } catch {}
         await writeFilesForLanguage(wc, language, latestCodeRef.current)
         if (url) setIframeUrl(urlWithBust(url))
+        // Explicitly reload iframe by adding a dummy hash change if needed
+        setTimeout(() => { if (url) setIframeUrl(urlWithBust(url)) }, 50)
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
       }
@@ -317,6 +331,8 @@ const INDEX_HTML_PY = `<!doctype html>
     <script type="module">
       import { loadPyodide } from 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.mjs';
       const status = document.getElementById('status');
+      self.addEventListener('error', (e) => { try { status.textContent = 'JS Error: ' + (e?.message || e); } catch {} });
+      self.addEventListener('unhandledrejection', (e) => { try { status.textContent = 'Promise Rejection: ' + (e?.reason?.message || e?.reason || 'unknown'); } catch {} });
       try {
         status.textContent = 'Loading Pyodide…';
         const pyodide = await loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/' });

@@ -2,7 +2,8 @@
 .prose {
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
   color: #e5e7eb;
-  line-height: 1.35;
+  font-size: 20px;
+  line-height: 1.15;
 }
 
 /* Headings */
@@ -16,17 +17,17 @@
   -webkit-text-fill-color: transparent;
   background-clip: text;
   line-height: 1.1;
-  margin: 1rem 0 0.5rem;
+  margin: 1rem 0 0.2rem;
 }
 .md-h1 + .md-p,
 .md-h2 + .md-p,
-.md-h3 + .md-p { margin-top: .5rem; }
-.md-h1 { font-size: 2rem; margin-top: 1.25rem; }
+.md-h3 + .md-p { margin-top: .15rem; }
+.md-h1 { font-size: 2rem; }
 .md-h2 { font-size: 1.5rem; }
 .md-h3 { font-size: 1.25rem; }
 
 /* Paragraphs */
-.md-p { margin: .25rem 0; color: #d1d5db; }
+.md-p { margin: .1rem 0; color: #d1d5db; font-size: 20px; line-height: 1.15; font-weight: 500; }
 
 /* Ensure no selection-like highlights or artifacts on prose text */
 .prose, .prose * {
@@ -40,8 +41,8 @@
 .md-link:hover::after { width: 100%; }
 
 /* Lists */
-.md-ul, .md-ol { margin: .4rem 0 .4rem 1.1rem; color: #d1d5db; }
-.md-li { margin: .2rem 0; }
+.md-ul, .md-ol { margin: .25rem 0 .25rem 1.1rem; color: #d1d5db; }
+.md-li { margin: .2rem 0; font-size: 20px; line-height: 1.15; font-weight: 500; }
 
 /* Blockquote */
 .md-quote {
@@ -87,4 +88,3 @@
 
 /* Mermaid container */
 .md-mermaid { margin: 1rem 0; padding: 1rem; border: 1px solid #1f2937; border-radius: 10px; background: #0a0e1a; overflow: auto; }
-

@@ -23,6 +23,9 @@ export default function App() {
   const micStreamRef = useRef<MediaStream | null>(null)
   const micRecorderRef = useRef<MediaRecorder | null>(null)
   const dgSocketRef = useRef<WebSocket | null>(null)
+  const micBaseInputRef = useRef<string>('')
+  const micCommittedRef = useRef<string>('')
+  const micInterimRef = useRef<string>('')
   const [logs, setLogs] = useState<LogItem[]>([{ level: 'log', text: 'idle' }])
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [chartsOpen, setChartsOpen] = useState(false)
@@ -62,6 +65,21 @@ export default function App() {
       lastMermaidRef.current = m
       setChartsCode(m)
       setChartsOpen(true)
+    }
+  }, [markdown])
+
+  // Detect runnable code blocks (js/html/python) and auto-open CodeRun drawer
+  const lastCodeSigRef = useRef<string>('')
+  useEffect(() => {
+    const latest = extractLatestRunnableCode(markdown)
+    if (latest) {
+      const sig = `${latest.lang}\n${latest.code}`
+      if (sig !== lastCodeSigRef.current) {
+        lastCodeSigRef.current = sig
+        setRunLang(latest.lang)
+        setRunCode(latest.code)
+        setRunOpen(true)
+      }
     }
   }, [markdown])
 
@@ -285,6 +303,10 @@ export default function App() {
       dgSocketRef.current = socket
       socket.binaryType = 'arraybuffer'
       socket.onopen = () => {
+        // Capture baseline input at mic start
+        micBaseInputRef.current = input
+        micCommittedRef.current = ''
+        micInterimRef.current = ''
         const mime = chooseOpusMime()
         console.log('[mic] ws open; starting recorder with', mime)
         const rec = new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 128000 })
@@ -312,18 +334,34 @@ export default function App() {
           const isFinal: boolean = Boolean(msg?.is_final ?? msg?.speech_finalized)
           if (!transcript) return
           console.log('[mic] recv', { len: transcript.length, isFinal })
-          // Append live transcript to input, suppressing command phrase from display
-          setInput((prev) => {
-            const appended = (prev ? prev + ' ' : '') + transcript
-            let display = suppressCommandPhrases(appended)
-            if (!isFinal) display = suppressDanglingSendAtEnd(display)
-            if (hasSendHotword(appended)) {
-              const cleaned = display.trim()
-              queueMicrotask(() => onSend(cleaned))
-              return cleaned
-            }
-            return display
-          })
+          // Maintain committed (final) + interim (non-final) buffers
+          if (isFinal) {
+            micCommittedRef.current = micCommittedRef.current
+              ? micCommittedRef.current + ' ' + transcript
+              : transcript
+            micInterimRef.current = ''
+          } else {
+            micInterimRef.current = transcript
+          }
+          // Compose display: baseline + committed + interim
+          const join = (a: string, b: string) => {
+            const sa = (a || '').trim(); const sb = (b || '').trim();
+            if (!sa) return sb; if (!sb) return sa; return sa + ' ' + sb
+          }
+          let display = join(join(micBaseInputRef.current || '', micCommittedRef.current), micInterimRef.current)
+          display = suppressCommandPhrases(display)
+          if (!isFinal) display = suppressDanglingSendAtEnd(display)
+          if (hasSendHotword(display)) {
+            const cleaned = display.trim()
+            // Send cleaned and reset mic buffers, keep mic running
+            queueMicrotask(() => onSend(cleaned))
+            micBaseInputRef.current = ''
+            micCommittedRef.current = ''
+            micInterimRef.current = ''
+            setInput('')
+          } else {
+            setInput(display)
+          }
         } catch {
           // ignore non-JSON or interim messages
         }
@@ -629,6 +667,18 @@ function extractLatestMermaid(md: string): string | null {
   let last: string | null = null
   while ((match = re.exec(md)) !== null) {
     last = match[1]
+  }
+  return last
+}
+
+function extractLatestRunnableCode(md: string): { lang: string; code: string } | null {
+  if (!md) return null
+  // Match fenced code blocks ```lang\n...\n```; capture language and content
+  const re = /```(js|javascript|html|python|py)\n([\s\S]*?)\n```/gi
+  let match: RegExpExecArray | null
+  let last: { lang: string; code: string } | null = null
+  while ((match = re.exec(md)) !== null) {
+    last = { lang: match[1].toLowerCase(), code: match[2] }
   }
   return last
 }
