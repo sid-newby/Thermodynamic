@@ -12,12 +12,17 @@ import ChartsDrawer from './components/ChartsDrawer'
 import CodeRunDrawer from './components/CodeRunDrawer'
 
 type LogItem = { level: 'log' | 'warn' | 'error'; text: string };
+type ChatRole = 'user' | 'assistant'
+type ChatMessage = { role: ChatRole; content: string }
 
 export default function App() {
   const [input, setInput] = useState('')
   const [markdown, setMarkdown] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [micOn, setMicOn] = useState(false)
+  const micStreamRef = useRef<MediaStream | null>(null)
+  const micRecorderRef = useRef<MediaRecorder | null>(null)
+  const dgSocketRef = useRef<WebSocket | null>(null)
   const [logs, setLogs] = useState<LogItem[]>([{ level: 'log', text: 'idle' }])
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [chartsOpen, setChartsOpen] = useState(false)
@@ -27,6 +32,9 @@ export default function App() {
   const [runLang, setRunLang] = useState('')
   const [systemPrompt, setSystemPrompt] = useState('')
   const [saving, setSaving] = useState(false)
+  const [mermaidVars, setMermaidVars] = useState<string>('')
+  const [mermaidCss, setMermaidCss] = useState<string>('')
+  const [history, setHistory] = useState<ChatMessage[]>([])
   const streamBufRef = useRef('')
   const flushTimerRef = useRef<number | null>(null)
   const rawMdRef = useRef('')
@@ -86,6 +94,13 @@ export default function App() {
           setSystemPrompt(json?.prompt || '')
           if (json?.prompt) localStorage.setItem('systemPrompt', json.prompt)
         }
+        // Load mermaid theme
+        const tRes = await fetch('/api/mermaid-theme')
+        if (tRes.ok) {
+          const t = await tRes.json()
+          setMermaidVars(JSON.stringify(t?.variables || {}, null, 2))
+          setMermaidCss(String(t?.css || ''))
+        }
       } catch {
         console.warn('failed to load system prompt')
       }
@@ -108,6 +123,19 @@ export default function App() {
     }
   }
 
+  async function saveMermaidTheme(nextVars: string, nextCss: string) {
+    try {
+      const parsed = nextVars.trim() ? JSON.parse(nextVars) : {}
+      await fetch('/api/mermaid-theme', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ variables: parsed, css: nextCss || '' }),
+      })
+    } catch (e) {
+      console.error('failed to save mermaid theme', (e as any)?.message || String(e))
+    }
+  }
+
   // close drawer on ESC
   useEffect(() => {
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setDrawerOpen(false) }
@@ -115,24 +143,35 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  async function onSend() {
-    if (!canSend) return
+  async function onSend(forcedText?: string) {
+    const textToSend = forcedText ?? input
+    if (textToSend.trim().length === 0 || isLoading) return
     setIsLoading(true)
+    // Keep mic running for continuous capture
+    const userText = textToSend
+    const updatedHistory: ChatMessage[] = [...history, { role: 'user', content: userText }]
+    setHistory(updatedHistory)
     // Echo the user's message into the main pane before streaming
     // Add a blank line after the assistant header so streamed text starts as a paragraph
     {
-      const header = `${rawMdRef.current ? rawMdRef.current + '\n\n' : ''}**You:** ${input}\n\n### **Thermodynamic**\n\n`
+      const header = `${rawMdRef.current ? rawMdRef.current + '\n\n' : ''}**You:** ${userText}\n\n### **Thermodynamic**\n\n`
       rawMdRef.current = header
       setMarkdown(header)
     }
     try {
-      console.log('[send]', input)
-      const res = await fetch('/api/message', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: input }) })
+      console.log('[send]', userText)
+      const recentHistory = updatedHistory.slice(-10)
+      const res = await fetch('/api/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: userText, history: recentHistory }),
+      })
       if (!res.body) throw new Error('No stream')
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let buf = ''
       setInput('')
+      let assistantText = ''
       const scheduleFlush = () => {
         if (flushTimerRef.current != null) return
         flushTimerRef.current = window.setTimeout(() => {
@@ -169,6 +208,7 @@ export default function App() {
           const payload = JSON.parse(dataLine.slice(6))
           if (payload.type === 'text') {
             streamBufRef.current += payload.text
+            assistantText += payload.text
             scheduleFlush()
           } else if (payload.type === 'tool') {
             console.log(`[tool] ${payload.name}`)
@@ -178,6 +218,9 @@ export default function App() {
             // force re-render if empty
             flushNow()
             setMarkdown((m) => m || '')
+            if (assistantText.trim()) {
+              setHistory((h) => [...h, { role: 'assistant', content: assistantText }])
+            }
           }
         }
       }
@@ -204,6 +247,151 @@ export default function App() {
       el.scrollTop = el.scrollHeight
     })
   }, [markdown, isLoading])
+
+  async function toggleMic() {
+    if (micOn) {
+      stopMic()
+      setMicOn(false)
+      return
+    }
+    try {
+      const keyRes = await fetch('/api/deepgram-token')
+      const { key } = await keyRes.json()
+      if (!key) throw new Error('Missing Deepgram key')
+      console.log('[mic] requesting user media')
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: { ideal: 1 },
+          noiseSuppression: { ideal: true },
+          echoCancellation: { ideal: true },
+          autoGainControl: { ideal: true },
+          sampleRate: { ideal: 48000 },
+        },
+      })
+      micStreamRef.current = stream
+      const qs = new URLSearchParams({
+        model: 'nova-3',
+        encoding: 'opus',
+        interim_results: 'true',
+        smart_format: 'true',
+        punctuate: 'true',
+        vad_events: 'true',
+        channels: '1',
+        language: 'en-US',
+      })
+      const wsUrl = `wss://api.deepgram.com/v1/listen?${qs.toString()}`
+      console.log('[mic] opening ws', wsUrl)
+      const socket = new WebSocket(wsUrl, ['token', key] as unknown as string)
+      dgSocketRef.current = socket
+      socket.binaryType = 'arraybuffer'
+      socket.onopen = () => {
+        const mime = chooseOpusMime()
+        console.log('[mic] ws open; starting recorder with', mime)
+        const rec = new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 128000 })
+        micRecorderRef.current = rec
+        rec.ondataavailable = (e) => {
+          const data = e.data
+          if (data && data.size > 0 && socket.readyState === WebSocket.OPEN) {
+            data.arrayBuffer().then((buf) => {
+              socket.send(buf)
+              console.log('[mic] sent chunk', (buf as ArrayBuffer).byteLength, 'bytes')
+            })
+          }
+        }
+        rec.start(100)
+        setMicOn(true)
+      }
+      socket.onmessage = (ev) => {
+        try {
+          const raw = typeof ev.data === 'string' ? ev.data : ''
+          if (!raw) return
+          const msg = JSON.parse(raw)
+          console.log('[mic] msg', msg?.type || 'Results')
+          // Deepgram typically sends { type: 'Results', channel: { alternatives: [{ transcript, words, ... }] }, is_final }
+          const transcript: string | undefined = msg?.channel?.alternatives?.[0]?.transcript
+          const isFinal: boolean = Boolean(msg?.is_final ?? msg?.speech_finalized)
+          if (!transcript) return
+          console.log('[mic] recv', { len: transcript.length, isFinal })
+          // Append live transcript to input, suppressing command phrase from display
+          setInput((prev) => {
+            const appended = (prev ? prev + ' ' : '') + transcript
+            let display = suppressCommandPhrases(appended)
+            if (!isFinal) display = suppressDanglingSendAtEnd(display)
+            if (hasSendHotword(appended)) {
+              const cleaned = display.trim()
+              queueMicrotask(() => onSend(cleaned))
+              return cleaned
+            }
+            return display
+          })
+        } catch {
+          // ignore non-JSON or interim messages
+        }
+      }
+      socket.onclose = () => {
+        console.warn('[mic] ws close')
+        stopMic()
+        setMicOn(false)
+      }
+      socket.onerror = (e) => {
+        console.error('[mic] ws error', e)
+        stopMic()
+        setMicOn(false)
+      }
+    } catch (e) {
+      console.error('mic error', (e as any)?.message || String(e))
+      stopMic()
+      setMicOn(false)
+    }
+  }
+
+  function stopMic() {
+    try { micRecorderRef.current?.stop() } catch {}
+    micRecorderRef.current = null
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((t) => t.stop())
+      micStreamRef.current = null
+    }
+    try {
+      if (dgSocketRef.current && dgSocketRef.current.readyState === WebSocket.OPEN) {
+        try { dgSocketRef.current.send(JSON.stringify({ type: 'CloseStream' })) } catch {}
+      }
+      dgSocketRef.current?.close()
+    } catch {}
+    dgSocketRef.current = null
+  }
+
+  function hasSendHotword(text: string): boolean {
+    const t = text.toLowerCase()
+    return /\b(send\s*it|send-it)\b/.test(t)
+  }
+
+  // Note: replaced by suppression helpers; keep for future use if needed
+
+  // Hide command phrases from the visible input (even if we don't trigger send yet)
+  function suppressCommandPhrases(text: string): string {
+    return text.replace(/\b(send\s*it|send-it)\b/gi, '').replace(/\b(send)\b\s*$/i, '')
+  }
+
+  // If interim buffer ends with a dangling 'send' at the end, hide it until finalized
+  function suppressDanglingSendAtEnd(text: string): string {
+    return text.replace(/\b(send)\b\s*$/i, '')
+  }
+
+  function chooseOpusMime(): string {
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/ogg;codecs=opus',
+      'audio/webm',
+    ]
+    for (const m of candidates) {
+      try {
+        // Some environments may not type this, but it exists at runtime
+        if (typeof MediaRecorder !== 'undefined' && (MediaRecorder as any).isTypeSupported?.(m)) return m
+      } catch {}
+    }
+    return ''
+  }
 
   const mdComponents: any = {
     h1: (p: any) => <h1 className="md-h1" {...p} />,
@@ -318,13 +506,13 @@ export default function App() {
           onKeyDown={onKeyDown}
           rows={1}
         />
-        <button className="composer__icon" aria-label="Send" disabled={!canSend} onClick={onSend}>
+        <button className="composer__icon" aria-label="Send" disabled={!canSend} onClick={() => onSend()}>
           <Send size={18} />
         </button>
         <button
           className={`composer__icon ${micOn ? 'composer__icon--recording' : ''}`}
           aria-label="Microphone"
-          onClick={() => setMicOn((s) => !s)}
+          onClick={() => toggleMic()}
         >
           <Mic size={18} />
         </button>
@@ -369,6 +557,35 @@ export default function App() {
                   }}
                   placeholder="Enter system prompt…"
                 />
+                <div className="row" style={{ justifyContent: 'space-between', marginTop: 16, marginBottom: 8 }}>
+                  <div className="app__title">Mermaid Theme</div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <div style={{ color: '#9ca3af', fontSize: 12, marginBottom: 6 }}>Theme Variables (JSON)</div>
+                    <textarea
+                      className="textarea"
+                      value={mermaidVars}
+                      onChange={(e) => setMermaidVars(e.target.value)}
+                      placeholder={`{\n  "primaryColor": "#00ffff"\n}`}
+                      style={{ minHeight: 160 }}
+                    />
+                  </div>
+                  <div>
+                    <div style={{ color: '#9ca3af', fontSize: 12, marginBottom: 6 }}>Extra CSS</div>
+                    <textarea
+                      className="textarea"
+                      value={mermaidCss}
+                      onChange={(e) => setMermaidCss(e.target.value)}
+                      placeholder=".node rect { stroke-width: 3px }"
+                      style={{ minHeight: 160 }}
+                    />
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button className="btn" onClick={() => saveMermaidTheme(mermaidVars, mermaidCss)}>Save Theme</button>
+                  <span style={{ color: '#6b7280', fontSize: 12 }}>Re-open Charts to apply.</span>
+                </div>
               </div>
               <div className="drawer__footer">
                 <div style={{ color: '#6b7280', fontSize: 12 }}>Persistent between sessions</div>

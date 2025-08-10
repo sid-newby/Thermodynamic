@@ -60,8 +60,20 @@ export function ChartsDrawer({ open, onClose, code }: { open: boolean; onClose: 
       if (!cache.wc) {
         setBooting(true)
         cache.wc = await WebContainer.boot({ workdirName: 'mermaid-renderer' })
+        // Fetch theme config (variables + css) from backend
+        let variables: Record<string, unknown> | undefined
+        let css: string | undefined
+        try {
+          const res = await fetch('/api/mermaid-theme')
+          if (res.ok) {
+            const json = await res.json()
+            variables = (json && typeof json.variables === 'object') ? json.variables : undefined
+            css = typeof json?.css === 'string' ? json.css : undefined
+          }
+        } catch {}
         // Prepare minimal files (no npm install required)
-        await cache.wc.fs.writeFile('index.html', INDEX_HTML)
+        await cache.wc.fs.writeFile('index.html', buildIndexHtml(variables, css))
+        await cache.wc.fs.writeFile('main.mjs', MAIN_JS)
         await cache.wc.fs.writeFile('diagram.mmd', latestCodeRef.current || 'graph TD; A[Empty] --> B[Diagram]')
         await cache.wc.fs.writeFile('server.js', SERVER_JS)
 
@@ -81,6 +93,28 @@ export function ChartsDrawer({ open, onClose, code }: { open: boolean; onClose: 
             },
           }),
         ).catch(() => {})
+      }
+
+      // Always sync the current diagram and html on open to avoid stale renders
+      if (cache.wc) {
+        try { await cache.wc.fs.rm('diagram.mmd') } catch {}
+        await cache.wc.fs.writeFile('diagram.mmd', latestCodeRef.current || '')
+        // Rewrite index.html as well, ensuring a fresh script execution path
+        try { await cache.wc.fs.rm('index.html') } catch {}
+        // Re-fetch theme in case it changed
+        let variables: Record<string, unknown> | undefined
+        let css: string | undefined
+        try {
+          const res = await fetch('/api/mermaid-theme')
+          if (res.ok) {
+            const json = await res.json()
+            variables = (json && typeof json.variables === 'object') ? json.variables : undefined
+            css = typeof json?.css === 'string' ? json.css : undefined
+          }
+        } catch {}
+        await cache.wc.fs.writeFile('index.html', buildIndexHtml(variables, css))
+        try { await cache.wc.fs.rm('main.mjs') } catch {}
+        await cache.wc.fs.writeFile('main.mjs', MAIN_JS)
       }
 
       // If we already have a server URL, just use it
@@ -181,7 +215,13 @@ function urlWithBust(url: string): string {
   return u.toString()
 }
 
-const INDEX_HTML = `<!doctype html>
+function buildIndexHtml(variables?: Record<string, unknown>, extraCss?: string): string {
+  const varJson = JSON.stringify(variables || {})
+  const varJsonEscaped = varJson.replace(/<\//g, '<\\/')
+  const cssBlock = (extraCss && String(extraCss).trim().length > 0)
+    ? `\n/* Extra custom CSS */\n${extraCss}\n`
+    : ''
+  return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -192,20 +232,17 @@ const INDEX_HTML = `<!doctype html>
       body { margin: 0; background: #0b0b0b; color: #e5e5e5; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system; }
       .wrap { padding: 16px; }
       .box { background: #0a0e1a; border: 1px solid #1f2937; border-radius: 10px; padding: 16px; overflow: auto; }
+      /* Cyberpunk Mermaid CSS overrides */
+      .node rect { stroke-width: 3px !important; filter: drop-shadow(0 0 10px currentColor); }
+      .node text { font-weight: 900 !important; font-size: 14px !important; text-shadow: 2px 2px 0px rgba(0,0,0,0.8), -1px -1px 0px rgba(0,0,0,0.8), 1px -1px 0px rgba(0,0,0,0.8), -1px 1px 0px rgba(0,0,0,0.8); }
+      .edgeLabel { background-color: #0a0e27 !important; padding: 5px !important; border: 2px solid #00ffff !important; font-weight: bold !important; }
+      .flowchart-link { stroke-width: 3px !important; filter: drop-shadow(0 0 5px currentColor); }
+      .cluster text { font-size: 18px !important; font-weight: 900 !important; fill: #00ffff !important; }
+      .node.default { filter: drop-shadow(0 0 20px rgba(255,0,128,0.6)); }
+      ${cssBlock}
     </style>
-    <script type="module">
-      import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-      mermaid.initialize({ startOnLoad: false, theme: 'dark', logLevel: 'fatal' });
-      const el = document.getElementById('root');
-      try {
-        const res = await fetch('/diagram.mmd', { cache: 'no-store' });
-        const code = await res.text();
-        const { svg } = await mermaid.render('mmd-' + Math.random().toString(36).slice(2), code);
-        el.innerHTML = svg;
-      } catch (e) {
-        el.textContent = 'Failed to render: ' + (e?.message || e);
-      }
-    </script>
+    <script id="theme-vars" type="application/json">${varJsonEscaped}</script>
+    <script type="module" src="/main.mjs"></script>
   </head>
   <body>
     <div class="wrap">
@@ -213,6 +250,7 @@ const INDEX_HTML = `<!doctype html>
     </div>
   </body>
 </html>`
+}
 
 const SERVER_JS = `import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -264,4 +302,67 @@ console.log('server-ready', port);
 
 export default ChartsDrawer
 
+
+const MAIN_JS = `import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
+let externalVars = {};
+try { externalVars = JSON.parse(document.getElementById('theme-vars')?.textContent || '{}') } catch {}
+
+const mermaidConfig = {
+  startOnLoad: false,
+  logLevel: 'fatal',
+  securityLevel: 'loose',
+  theme: 'base',
+  themeVariables: externalVars,
+};
+
+mermaid.initialize(mermaidConfig);
+const el = document.getElementById('root');
+try {
+  const res = await fetch('/diagram.mmd', { cache: 'no-store' });
+  let original = (await res.text()) || '';
+  original = original.replace(/^%%\\{init[\\s\\S]*?\\}%%\\s*/m, '').trim();
+
+  const MAX_TRIES = 4;
+  function normalize(src, attempt) {
+    try { src = String(src); } catch { return src; }
+    if (attempt === 0) return src;
+    if (attempt === 1) {
+      let out = src;
+      out = out.replace(/^\\s*(flowchart|graph)\\s+([A-Za-z]{2})\\b\\s*/i, function(_m, a, dir) { return String(a) + ' ' + String(dir) + '\\n'; });
+      out = out.replace(/^\\s*(sequenceDiagram|classDiagram|erDiagram|stateDiagram(?:-v2)?|journey|gantt)\\b\\s*/i, function(_m, t) { return String(t) + '\\n'; });
+      return out;
+    }
+    if (attempt === 2) {
+      return src
+        .replace(/\\s+(?=(style|linkStyle|classDef|click|subgraph|end)\\b)/g, '\\n')
+        .replace(/\\s+--\\>\\s+/g, ' -->\\n ');
+    }
+    if (attempt === 3) {
+      return src
+        .replace(/;\\s*/g, ';\\n')
+        .replace(/(\\])\\s+(?=[A-Za-z][A-Za-z0-9_]*\\s*(\\[|--|==|:::|:))/g, '$1\\n')
+        .replace(/\\)\\s+(?=[A-Za-z][A-Za-z0-9_]*\\s*(\\[|--|==|:::|:))/g, ')\\n');
+    }
+    return src;
+  }
+
+  for (let i = 0; i < MAX_TRIES; i++) {
+    const code = normalize(original, i);
+    try {
+      const id = 'mmd-' + Math.random().toString(36).slice(2);
+      const { svg } = await mermaid.render(id, code);
+      if (!svg || String(svg).trim().length < 20) throw new Error('Empty SVG');
+      el.innerHTML = svg;
+      break;
+    } catch (err) {
+      console.error('[mermaid] render attempt', i, 'failed:', err);
+      if (i === MAX_TRIES - 1) {
+        el.textContent = 'Failed to render: ' + (err?.message || err);
+      }
+    }
+  }
+} catch (e) {
+  el.textContent = 'Failed to render: ' + (e?.message || e);
+}`
 

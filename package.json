@@ -6,12 +6,14 @@
   "scripts": {
     "api": "bun run claude.ts",
     "web": "vite",
-    "dev": "concurrently -k -r -n API,WEB -c green.bold,cyan.bold \"bun run claude.ts\" \"vite\"",
+    "kill-ports": "bash -c 'for p in 3000 5173; do pids=$(lsof -ti tcp:$p); if [ -n \"$pids\" ]; then echo Killing on port $p: $pids; kill -9 $pids || true; fi; done'",
+    "dev": "bun run kill-ports && concurrently -k -r -n API,WEB -c green.bold,cyan.bold \"bun run claude.ts\" \"vite\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@deepgram/sdk": "^4.11.2",
     "@radix-ui/react-icons": "^1.3.2",
     "@radix-ui/themes": "^3.2.1",
     "@tailwindcss/vite": "^4.1.11",

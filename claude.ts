@@ -202,6 +202,7 @@ if (SUPABASE_URL && SUPABASE_SERVICE_ROLE) {
 
 const SETTINGS_TABLE = "app_settings"; // columns: key text primary key, value text
 const SYSTEM_PROMPT_KEY = "system_prompt";
+const MERMAID_THEME_KEY = "mermaid_theme"; // stores JSON string: { variables: object, css: string }
 
 let cachedSystemPrompt = "";
 
@@ -228,6 +229,33 @@ async function saveSystemPrompt(next: string): Promise<void> {
   if (error) console.warn("Failed to save system prompt:", error.message);
 }
 
+async function loadMermaidTheme(): Promise<{ variables?: Record<string, unknown>; css?: string }> {
+  if (!supabase) return {};
+  const { data, error } = await supabase
+    .from(SETTINGS_TABLE)
+    .select("value")
+    .eq("key", MERMAID_THEME_KEY)
+    .maybeSingle();
+  if (error) {
+    console.warn("Failed to load mermaid theme:", error.message);
+    return {};
+  }
+  try {
+    return data?.value ? JSON.parse(data.value as string) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function saveMermaidTheme(theme: { variables?: Record<string, unknown>; css?: string }): Promise<void> {
+  if (!supabase) return;
+  const payload = JSON.stringify(theme || {});
+  const { error } = await supabase
+    .from(SETTINGS_TABLE)
+    .upsert({ key: MERMAID_THEME_KEY, value: payload }, { onConflict: "key" });
+  if (error) console.warn("Failed to save mermaid theme:", error.message);
+}
+
 // Prime cache on startup
 try {
   loadSystemPrompt().then((v) => (cachedSystemPrompt = v || ""));
@@ -240,6 +268,33 @@ Bun.serve({
   port: Number(process.env.PORT || 3000),
   async fetch(req) {
     const url = new URL(req.url);
+    // Expose Deepgram key for browser WebSocket auth (dev-only). Do NOT use this in production as-is.
+    if (req.method === "GET" && url.pathname === "/api/deepgram-token") {
+      const key = process.env.DEEPGRAM_API_KEY || "";
+      const body = { key, warn: key ? undefined : "Missing DEEPGRAM_API_KEY" } as any;
+      return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" } });
+    }
+    // Mermaid theme (GET)
+    if (req.method === "GET" && url.pathname === "/api/mermaid-theme") {
+      try {
+        const theme = await loadMermaidTheme();
+        return new Response(JSON.stringify(theme || {}), { headers: { "Content-Type": "application/json" } });
+      } catch (e: any) {
+        return new Response("{}", { headers: { "Content-Type": "application/json" } });
+      }
+    }
+    // Mermaid theme (PUT)
+    if (req.method === "PUT" && url.pathname === "/api/mermaid-theme") {
+      try {
+        const body = await req.json();
+        const variables = (body && typeof body.variables === "object") ? body.variables : undefined;
+        const css = typeof body?.css === "string" ? body.css : undefined;
+        await saveMermaidTheme({ variables, css });
+        return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ ok: false, error: e?.message || String(e) }), { status: 400, headers: { "Content-Type": "application/json" } });
+      }
+    }
     // Get current system prompt
     if (req.method === "GET" && url.pathname === "/api/system-prompt") {
       try {
@@ -262,7 +317,11 @@ Bun.serve({
     }
     if (req.method === "POST" && url.pathname === "/api/message") {
       try {
-        const { text } = await req.json();
+        const body = await req.json();
+        const text: string = String(body?.text || "");
+        const history: Array<{ role: "user" | "assistant"; content: string }> = Array.isArray(body?.history)
+          ? body.history.map((m: any) => ({ role: m?.role, content: String(m?.content || "") }))
+          : [];
         const systemBlocks = [
           {
             type: "text" as const,
@@ -270,12 +329,16 @@ Bun.serve({
             cache_control: { type: "ephemeral" as const, ttl: "1h" },
           },
         ];
+        // Convert prior turns to Anthropic format; include only last 10 for brevity
+        const priorMessages = history.slice(-10).map((m) => ({
+          role: m.role,
+          content: [{ type: "text" as const, text: m.content }],
+        }));
+
         const stream = await anthropic.beta.messages.stream({
           ...params,
           system: systemBlocks,
-          messages: [
-            { role: "user", content: [{ type: "text", text }] },
-          ],
+          messages: [...priorMessages, { role: "user", content: [{ type: "text", text }] }],
         } as any);
 
         const encoder = (s: string) => new TextEncoder().encode(s);
