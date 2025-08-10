@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { getServerUrl } from '../wc'
 import { motion, AnimatePresence } from 'framer-motion'
 
 type WebContainerType = typeof import('@webcontainer/api')
@@ -26,101 +27,27 @@ export function CodeRunDrawer({
   language: string
 }) {
   const [iframeUrl, setIframeUrl] = useState<string | null>(null)
-  const [booting, setBooting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [booting] = useState(false)
+  const [error] = useState<string | null>(null)
   const latestCodeRef = useRef<string>('')
   latestCodeRef.current = code
 
-  const clientId = (import.meta as unknown as { env?: Record<string, unknown> })?.env
-    ?.VITE_WEB_CONTAINERS_CLIENT_ID as string | undefined
+  // Intentionally unused: container lifecycle is external; keep variable removed to avoid lints
 
-  const ensureBoot = useCallback(async (): Promise<void> => {
-    if (!open) return
-    try {
-      setError(null)
-      const coi = (globalThis as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated
-      if (!coi) {
-        setError(
-          'This page is not cross-origin isolated. Restart the dev server after enabling COOP/COEP headers.'
-        )
-        return
-      }
-      if (!window.__RUN_WC__) window.__RUN_WC__ = { api: null, wc: null, serverUrl: null, process: null }
-      const cache = window.__RUN_WC__
-      if (!cache.api) {
-        setBooting(true)
-        const mod = (await import('@webcontainer/api')) as typeof import('@webcontainer/api') & {
-          auth?: { init?: (opts: { clientId: string; scope?: string }) => Promise<void> | void }
-        }
-        try {
-          if (clientId) await mod.auth?.init?.({ clientId, scope: '' })
-        } catch (e) {
-          // ignore auth init errors
-          console.warn('Failed to init WebContainer auth', e)
-        }
-        cache.api = mod
-      }
-      const { WebContainer } = cache.api!
-      if (!cache.wc) {
-        setBooting(true)
-        cache.wc = await WebContainer.boot({ workdirName: 'code-runner', coep: 'credentialless', forwardPreviewErrors: 'exceptions-only' })
-        // Surface preview exceptions to parent console and internal errors/ports
-        cache.wc.on('preview-message', (msg: unknown) => { try { console.error('[code-runner preview]', msg) } catch {/* ignore */} })
-        cache.wc.on('error', (err: { message: string }) => { try { console.error('[code-runner wc error]', err); setError(err?.message || String(err)) } catch {/* ignore */} })
-        cache.wc.on('port', (port: number, type: 'open' | 'close', url: string) => { try { console.log('[code-runner wc port]', port, type, url) } catch {/* ignore */} })
-        // Write static assets
-        await cache.wc.fs.writeFile('server.js', SERVER_JS)
-        // Add a tiny index fallback to ensure the server responds quickly
-        await cache.wc.fs.writeFile('index.html', '<!doctype html><html><body><div id="app"></div></body></html>')
-        // Start server
-        const proc = await cache.wc.spawn('node', ['server.js'])
-        cache.process = proc
-        cache.wc.on('server-ready', (_port, url) => {
-          cache.serverUrl = url
-          setIframeUrl(urlWithBust(url))
-        })
-        proc.output
-          .pipeTo(
-            new WritableStream({
-              write() {
-                // no-op
-              },
-            })
-          )
-          .catch(() => {})
-      }
+  // removed internal boot logic; container lifecycle is external
 
-      // If we have a server, ensure files are written and iframe is set
-      if (cache.wc && cache.serverUrl) {
-        await writeFilesForLanguage(cache.wc, language, latestCodeRef.current)
-        setIframeUrl(urlWithBust(cache.serverUrl))
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBooting(false)
-    }
-  }, [open, clientId, language])
-
+  // Do not boot on open; just attach to existing server if present
   useEffect(() => {
     if (!open) return
-    ensureBoot()
-  }, [open, ensureBoot])
+    const url = getServerUrl()
+    if (url) setIframeUrl(urlWithBust(url + '/run'))
+  }, [open])
 
   // Sync code changes
   useEffect(() => {
-    const cache = window.__RUN_WC__
-    const wc = cache?.wc
-    const url = cache?.serverUrl
-    if (!open || !wc) return
-    ;(async () => {
-      try {
-        await writeFilesForLanguage(wc, language, latestCodeRef.current)
-        if (url) setIframeUrl(urlWithBust(url))
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
-      }
-    })()
+    if (!open) return
+    const url = getServerUrl()
+    if (url) setIframeUrl(urlWithBust(url + '/run'))
   }, [code, language, open])
 
   return (
@@ -177,180 +104,14 @@ export function CodeRunDrawer({
   )
 }
 
+// Write helpers are centralized in src/wc.ts
+
 function urlWithBust(url: string): string {
   const u = new URL(url)
   u.searchParams.set('t', String(Date.now()))
   return u.toString()
 }
 
-async function writeFilesForLanguage(
-  wc: import('@webcontainer/api').WebContainer,
-  language: string,
-  code: string
-): Promise<void> {
-  const lang = language.toLowerCase()
-  if (lang === 'python' || lang === 'py') {
-    await wc.fs.writeFile('index.html', INDEX_HTML_PY)
-    await wc.fs.writeFile('snippet.py', code)
-    return
-  }
-  if (lang === 'html' || code.trim().startsWith('<!doctype') || code.trim().startsWith('<html')) {
-    // Use provided HTML; ensure console shim and force a cache-busting noop
-    const html = ensureConsoleShimInHtml(code)
-    await wc.fs.writeFile('index.html', html)
-    return
-  }
-  // Default to JS module executed in the browser
-  await wc.fs.writeFile('index.html', INDEX_HTML_JS)
-  await wc.fs.writeFile('snippet.js', wrapSnippet(code))
-}
-
-function ensureConsoleShimInHtml(html: string): string {
-  if (html.includes('__console_shim__')) return html
-  const shim = `<script>\n(function(){\n  if (window.__console_shim__) return;\n  window.__console_shim__=true;\n  const out=document.getElementById('preview-console')||document.body.appendChild(Object.assign(document.createElement('pre'),{id:'preview-console',style:'background:#0a0e1a;border:1px solid #1f2937;border-radius:10px;padding:12px;white-space:pre-wrap;'}));\n  const write=(lvl, args)=>{out.textContent += '['+lvl+'] '+args.map(a=>{try{return typeof a==='string'?a:JSON.stringify(a)}catch{return String(a)}}).join(' ')+'\n'};\n  ['log','warn','error'].forEach(k=>{const orig=console[k];console[k]=(...a)=>{try{write(k,a)}catch{};orig.apply(console,a)};});\n})();\n</script>`
-  if (html.includes('</head>')) return html.replace('</head>', `${shim}\n</head>`)
-  if (html.includes('</body>')) return html.replace('</body>', `${shim}\n</body>`)
-  return shim + html
-}
-
-function wrapSnippet(code: string): string {
-  return `// user snippet\ntry {\n${code}\n} catch (e) {\n  console.error(e?.message || String(e));\n}`
-}
-
-const INDEX_HTML_JS = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Code Preview</title>
-    <style>
-      :root { color-scheme: dark; }
-      body { margin: 0; background: #0b0b0b; color: #e5e5e5; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system; }
-      .wrap { padding: 16px; display: grid; gap: 12px; }
-      .box { background: #0a0e1a; border: 1px solid #1f2937; border-radius: 10px; padding: 16px; overflow: auto; }
-    </style>
-    <script>
-      (function(){
-        if (window.__console_shim__) return; window.__console_shim__=true;
-        const out=document.getElementById('preview-console')||document.body.appendChild(Object.assign(document.createElement('pre'),{id:'preview-console',className:'box'}));
-        const write=(lvl, args)=>{out.textContent += '['+lvl+'] '+args.map(a=>{try{return typeof a==='string'?a:JSON.stringify(a)}catch{return String(a)}}).join(' ')+'\n'};
-        ['log','warn','error'].forEach(k=>{const orig=console[k];console[k]=(...a)=>{try{write(k,a)}catch{};orig.apply(console,a)};});
-      })();
-    </script>
-    <script type="module" src="/snippet.js"></script>
-  </head>
-  <body>
-    <div class="wrap">
-      <div class="box">Open the console output below. Your JS runs as a browser module.</div>
-      <pre id="preview-console" class="box"></pre>
-    </div>
-  </body>
-</html>`
-
-const SERVER_JS = `import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
-
-const port = Number(process.env.PORT || 3000);
-
-const server = createServer(async (req, res) => {
-  try {
-    const u = new URL(req.url || '/', 'http://wc.local');
-    const path = u.pathname;
-    if (path === '/' || path === '/index.html') {
-      const html = await readFile('index.html', 'utf8').catch(() => '<!doctype html><html><body><div>Loading…</div></body></html>');
-      res.writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store',
-        'Cross-Origin-Resource-Policy': 'cross-origin',
-      });
-      res.end(html);
-      return;
-    }
-    if (path === '/snippet.js') {
-      const js = await readFile('snippet.js', 'utf8').catch(() => 'console.warn("No snippet provided")');
-      res.writeHead(200, {
-        'content-type': 'text/javascript; charset=utf-8',
-        'cache-control': 'no-store',
-        'Cross-Origin-Resource-Policy': 'cross-origin',
-      });
-      res.end(js);
-      return;
-    }
-    if (path === '/snippet.py') {
-      const py = await readFile('snippet.py', 'utf8').catch(() => 'print("No snippet provided")')
-      res.writeHead(200, {
-        'content-type': 'text/plain; charset=utf-8',
-        'cache-control': 'no-store',
-        'Cross-Origin-Resource-Policy': 'cross-origin',
-      })
-      res.end(py)
-      return
-    }
-    if (path === '/favicon.ico') {
-      res.writeHead(204); res.end(); return;
-    }
-    res.statusCode = 404; res.end('not found');
-  } catch (e) {
-    res.statusCode = 500; res.end(String(e));
-  }
-});
-
-server.listen(port, '0.0.0.0');
-console.log('server-ready', port);
-`
-
-const INDEX_HTML_PY = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Python (Pyodide) Preview</title>
-    <style>
-      :root { color-scheme: dark; }
-      body { margin: 0; background: #0b0b0b; color: #e5e5e5; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system; }
-      .wrap { padding: 16px; display: grid; gap: 12px; }
-      .box { background: #0a0e1a; border: 1px solid #1f2937; border-radius: 10px; padding: 16px; overflow: auto; }
-      .muted { color: #9ca3af; font-size: 12px; }
-    </style>
-    <script>
-      (function(){
-        if (window.__console_shim__) return; window.__console_shim__=true;
-        const out=document.getElementById('preview-console')||document.body.appendChild(Object.assign(document.createElement('pre'),{id:'preview-console',className:'box'}));
-        const write=(lvl, args)=>{out.textContent += '['+lvl+'] '+args.map(a=>{try{return typeof a==='string'?a:JSON.stringify(a)}catch{return String(a)}}).join(' ')+'\n'};
-        ['log','warn','error'].forEach(k=>{const orig=console[k];console[k]=(...a)=>{try{write(k,a)}catch{};orig.apply(console,a)};});
-      })();
-    </script>
-    <!-- Load non-module build to avoid module parse issues -->
-    <script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
-    <script type="module">
-      const status = document.getElementById('status');
-      self.addEventListener('error', (e) => { try { status.textContent = 'JS Error: ' + (e?.message || e); } catch {} });
-      self.addEventListener('unhandledrejection', (e) => { try { status.textContent = 'Promise Rejection: ' + (e?.reason?.message || e?.reason || 'unknown'); } catch {} });
-      try {
-        status.textContent = 'Loading Pyodide…';
-        const pyodide = await (window as any).loadPyodide({ indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/' });
-        status.textContent = 'Loaded. Running snippet…';
-        const code = await fetch('/snippet.py', { cache: 'no-store' }).then(r => r.text());
-        // Capture stdout/stderr
-        const pre = document.getElementById('py-out');
-        function append(line){ pre.textContent += line + '\n'; }
-        pyodide.setStdout({ batched: (s) => append(s) });
-        pyodide.setStderr({ batched: (s) => append('[stderr] ' + s) });
-        await pyodide.runPythonAsync(code);
-        status.textContent = 'Done.';
-      } catch (e) {
-        console.error(e?.message || String(e));
-        status.textContent = 'Error.';
-      }
-    </script>
-  </head>
-  <body>
-    <div class="wrap">
-      <div class="box">Python is executed using Pyodide (WASM) in the browser.</div>
-      <div id="status" class="muted">Starting…</div>
-      <pre id="py-out" class="box"></pre>
-    </div>
-  </body>
-  </html>`
+// Templates and helpers removed; they live in src/wc.ts
 
 export default CodeRunDrawer

@@ -325,55 +325,120 @@ Bun.serve({
         const history: Array<{ role: "user" | "assistant"; content: string }> = Array.isArray(body?.history)
           ? body.history.map((m: any) => ({ role: m?.role, content: String(m?.content || "") }))
           : [];
-        const systemBlocks = [
-          {
-            type: "text" as const,
-            text: cachedSystemPrompt || "",
-            cache_control: { type: "ephemeral" as const, ttl: "1h" },
-          },
-        ];
-        // Convert prior turns to Anthropic format; include only last 10 for brevity
+        const auto: boolean = Boolean(body?.auto);
+        const maxSteps: number = Math.min(10, Math.max(1, Number(body?.max_steps || 5)));
+
+        const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral"; ttl: string } }> = [];
+        if (cachedSystemPrompt) {
+          systemBlocks.push({ type: "text", text: cachedSystemPrompt, cache_control: { type: "ephemeral", ttl: "1h" } });
+        }
+        if (auto) {
+          systemBlocks.push({
+            type: "text",
+            text:
+              "AUTO MODE: Work in small steps until satisfied. Plan briefly, act, and assess. At the very end of EACH message, append a fenced JSON block exactly in this format on its own lines: \n" +
+              "```json\n{\n  \"control\": { \"continue\": true|false, \"reason\": \"why continue or stop\" }\n}\n```\n" +
+              "If more work remains, set continue=true; otherwise false.",
+          });
+        }
+
         const priorMessages = history.slice(-10).map((m) => ({
           role: m.role,
           content: [{ type: "text" as const, text: m.content }],
         }));
 
-        const stream = await anthropic.beta.messages.stream({
-          ...params,
-          system: systemBlocks,
-          messages: [...priorMessages, { role: "user", content: [{ type: "text", text }] }],
-        } as any);
-
         const encoder = (s: string) => new TextEncoder().encode(s);
         const sse = new ReadableStream<Uint8Array>({
           start(controller) {
-            let closed = false
-            controller.enqueue(encoder(`event: message\n`));
-            // send initial echo of user message to populate pane with a header line
-            controller.enqueue(encoder(`data: ${JSON.stringify({ type: "text", text: "" })}\n\n`));
-            stream.on("text", (t: string) => {
-              if (closed) return
-              try { controller.enqueue(encoder(`data: ${JSON.stringify({ type: "text", text: t })}\n\n`)); } catch {}
-            });
-            stream.on("streamEvent", (ev: any) => {
-              if (closed) return
+            let closed = false;
+
+            async function runOne(messagesArr: Array<any>): Promise<string> {
+              const stream = await anthropic.beta.messages.stream({
+                ...params,
+                system: systemBlocks,
+                messages: messagesArr,
+              } as any);
+              let assistantText = "";
+              controller.enqueue(encoder(`event: message\n`));
+              controller.enqueue(encoder(`data: ${JSON.stringify({ type: "text", text: "" })}\n\n`));
+              stream.on("text", (t: string) => {
+                if (closed) return;
+                assistantText += t;
+                try {
+                  controller.enqueue(encoder(`data: ${JSON.stringify({ type: "text", text: t })}\n\n`));
+                } catch {}
+              });
+              stream.on("streamEvent", (ev: any) => {
+                if (closed) return;
+                try {
+                  if (ev?.type === "content_block_start") {
+                    const nm = ev?.content_block?.name;
+                    if (nm) controller.enqueue(encoder(`data: ${JSON.stringify({ type: "tool", name: nm })}\n\n`));
+                  }
+                } catch {}
+              });
+              await new Promise<void>((resolve) => {
+                stream.on("finalMessage", () => resolve());
+                stream.on("error", () => resolve());
+              });
+              return assistantText;
+            }
+
+            function parseControl(jsonFence: string | null): { cont: boolean; reason?: string } | null {
+              if (!jsonFence) return null;
               try {
-                if (ev?.type === "content_block_start") {
-                  const nm = ev?.content_block?.name;
-                  if (nm) controller.enqueue(encoder(`data: ${JSON.stringify({ type: "tool", name: nm })}\n\n`));
+                const obj = JSON.parse(jsonFence);
+                const ctl = (obj?.control as any) || {};
+                const cont = Boolean(ctl?.continue);
+                const reason = typeof ctl?.reason === "string" ? ctl.reason : undefined;
+                return { cont, reason };
+              } catch {
+                return null;
+              }
+            }
+
+            function extractLastJsonFence(full: string): string | null {
+              const re = /```json\s*([\s\S]*?)\s*```/gi;
+              let m: RegExpExecArray | null;
+              let last: string | null = null;
+              while ((m = re.exec(full)) !== null) {
+                last = m[1];
+              }
+              return last;
+            }
+
+            (async () => {
+              try {
+                const msgsBase: Array<any> = [...priorMessages, { role: "user", content: [{ type: "text", text }] }];
+                if (!auto) {
+                  const textOut = await runOne(msgsBase);
+                  if (!closed) controller.enqueue(encoder(`data: ${JSON.stringify({ type: "done" })}\n\n`));
+                  if (!closed) try { controller.close(); } catch {}
+                  closed = true;
+                  return;
                 }
-              } catch {}
-            });
-            stream.on("finalMessage", () => {
-              if (closed) return
-              try { controller.enqueue(encoder(`data: ${JSON.stringify({ type: "done" })}\n\n`)); } catch {}
-              try { controller.close(); } catch {}
-              closed = true
-            });
-            stream.on("error", (e: any) => {
-              if (closed) return
-              try { controller.enqueue(encoder(`data: ${JSON.stringify({ type: "error", message: String(e?.message || e) })}\n\n`)); } catch {}
-            });
+
+                // Auto-loop
+                let msgs = msgsBase.slice();
+                for (let step = 1; step <= maxSteps; step++) {
+                  if (!closed) controller.enqueue(encoder(`data: ${JSON.stringify({ type: "tool", name: `auto_step_${step}` })}\n\n`));
+                  const assistantOut = await runOne(msgs);
+                  msgs.push({ role: "assistant", content: [{ type: "text", text: assistantOut }] });
+                  const fence = extractLastJsonFence(assistantOut);
+                  const ctl = parseControl(fence);
+                  if (!ctl || ctl.cont === false) break;
+                  // Nudge continuation succinctly
+                  msgs.push({ role: "user", content: [{ type: "text", text: "Continue." }] });
+                }
+                if (!closed) controller.enqueue(encoder(`data: ${JSON.stringify({ type: "done" })}\n\n`));
+                if (!closed) try { controller.close(); } catch {}
+                closed = true;
+              } catch (err: any) {
+                if (!closed) controller.enqueue(encoder(`data: ${JSON.stringify({ type: "error", message: String(err?.message || err) })}\n\n`));
+                if (!closed) try { controller.close(); } catch {}
+                closed = true;
+              }
+            })();
           },
         });
 

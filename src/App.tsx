@@ -8,8 +8,9 @@ import { Send, Mic, Box } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import './App.css'
 import './markdown-theme.css'
-import ChartsDrawer from './components/ChartsDrawer'
+import MermaidDrawer from './components/MermaidDrawer'
 import CodeRunDrawer from './components/CodeRunDrawer'
+import { bootWC, writeRunSnippet } from './wc'
 
 type LogItem = { level: 'log' | 'warn' | 'error'; text: string };
 type ChatRole = 'user' | 'assistant'
@@ -56,43 +57,38 @@ export default function App() {
   }, [])
 
   const canSend = input.trim().length > 0 && !isLoading
-  // Detect mermaid blocks in markdown and open Charts drawer automatically (parser-based)
-  const lastMermaidRef = useRef<string>('')
-  const chartsAutoRef = useRef<boolean>(false)
+  // Auto-open drawers and stream code to singleton WebContainers when a fully closed fenced block appears in the latest assistant message.
+  const lastCodeSigRef = useRef<string>('')
   useEffect(() => {
-    const tail = tailSection(markdown)
-    const m = scanLatestMermaid(tail)
-    if (m && m !== lastMermaidRef.current) {
-      lastMermaidRef.current = m
-      chartsAutoRef.current = true
-      setChartsState({ open: true, code: m })
-    } else if (!m && chartsState.open) {
-      // No mermaid present in latest markdown; close charts to avoid stale renders
-      if (chartsAutoRef.current) {
-        lastMermaidRef.current = ''
-        chartsAutoRef.current = false
-        setChartsState({ open: false, code: '' })
+    if (!messages.length) return
+    // Find the most recent message (user or assistant) with a closed fenced block
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const text = messages[i]?.text
+      if (!text) continue
+      const latest = scanLatestRunnableCode(text)
+      if (!latest) continue
+      const sig = `${latest.lang}\n${latest.code}`
+      if (sig === lastCodeSigRef.current) return
+      lastCodeSigRef.current = sig
+      // Send code to the appropriate container (booting if needed) and open the matching drawer
+      if (latest.lang === 'mermaid') {
+        setChartsState({ open: true, code: latest.code })
+      } else {
+        void writeRunSnippet(latest.lang, latest.code)
+        setRunState({ open: true, code: latest.code, language: latest.lang })
       }
+      return
     }
-  }, [markdown, chartsState.open])
-
-  // On-demand code execution; no longer auto-opens drawer
-  // const lastCodeSigRef = useRef<string>('')
-  // useEffect(() => {
-  //   const latest = scanLatestRunnableCode(tailSection(markdown))
-  //   if (latest) {
-  //     const sig = `${latest.lang}\n${latest.code}`
-  //     if (sig !== lastCodeSigRef.current) {
-  //       lastCodeSigRef.current = sig
-  //       setRunState({ open: true, code: latest.code, language: latest.lang })
-  //     }
-  //   }
-  // }, [markdown])
+  }, [messages])
 
   // (old regex-based detector removed)
 
   useEffect(() => { autoResize() }, [input])
   useEffect(() => { autoResize() }, [])
+  // Boot the shared container ASAP so routes are ready before any drawer opens
+  useEffect(() => {
+    void bootWC()
+  }, [])
   function autoResize() {
     const el = taRef.current; if (!el) return
     const cs = getComputedStyle(el)
@@ -481,19 +477,22 @@ export default function App() {
     code: ({ inline, className, children, ...props }: any) => {
       const match = /language-(\w+)/.exec(className || '')
       const codeString = String(children).replace(/\n$/, '')
-    if (!inline && match && match[1] === 'mermaid') {
-        return <div className="md-mermaid">Rendered in Charts panel ▶</div>
-      }
-      if (!inline && match) {
+    if (!inline && match) {
         return (
           <div className="md-code-block-wrapper">
             <div className="md-code-header">
               <span className="md-code-lang">{match[1]}</span>
-              {(match[1] === 'js' || match[1] === 'javascript' || match[1] === 'html' || match[1] === 'python' || match[1] === 'py') && (
+              {(match[1] === 'js' || match[1] === 'javascript' || match[1] === 'html' || match[1] === 'python' || match[1] === 'py' || match[1] === 'perl' || match[1] === 'pl' || match[1] === 'mermaid') && (
                 <button
                   className="md-code-run"
                   onClick={() => {
-                    setRunState({ open: true, code: codeString, language: match![1] })
+                    const lang = match![1]
+                      if (lang === 'mermaid') {
+                        setChartsState({ open: true, code: codeString })
+                      } else {
+                      void writeRunSnippet(lang, codeString)
+                      setRunState({ open: true, code: codeString, language: lang })
+                    }
                   }}
                   aria-label="Run in WebContainer"
                   title="Run in WebContainer"
@@ -505,12 +504,18 @@ export default function App() {
             <SyntaxHighlighter language={match[1]} style={oneDark} PreTag="div" customStyle={{ margin: 0, background: 'transparent' }}>
               {codeString}
             </SyntaxHighlighter>
-            {(match[1] === 'js' || match[1] === 'javascript' || match[1] === 'html' || match[1] === 'python' || match[1] === 'py') && (
+            {(match[1] === 'js' || match[1] === 'javascript' || match[1] === 'html' || match[1] === 'python' || match[1] === 'py' || match[1] === 'perl' || match[1] === 'pl' || match[1] === 'mermaid') && (
               <div className="md-code-footer">
                 <button
                   className="md-code-run"
                   onClick={() => {
-                    setRunState({ open: true, code: codeString, language: match![1] })
+                    const lang = match![1]
+                     if (lang === 'mermaid') {
+                       setChartsState({ open: true, code: codeString })
+                     } else {
+                      void writeRunSnippet(lang, codeString)
+                      setRunState({ open: true, code: codeString, language: lang })
+                    }
                   }}
                   aria-label="Run in WebContainer"
                   title="Run in WebContainer"
@@ -535,7 +540,7 @@ export default function App() {
       <header className="app__header">
         <div className="app__title">Thermodynamic</div>
         <div className="header__actions">
-          <button className="icon-btn" aria-label="WebContainers" onClick={() => setChartsState((s) => ({ ...s, open: !s.open }))}>
+          <button className="icon-btn" aria-label="WebContainers" onClick={() => setRunState((s) => ({ ...s, open: !s.open }))}>
             <Box size={16} />
           </button>
           <button className="icon-btn" aria-label="Settings" onClick={() => setDrawerOpen(true)}>⚙️</button>
@@ -669,8 +674,8 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Charts Drawer */}
-      <ChartsDrawer open={chartsState.open} onClose={() => setChartsState({ open: false, code: '' })} code={chartsState.code} />
+      {/* Mermaid Drawer (left) */}
+      <MermaidDrawer open={chartsState.open} onClose={() => setChartsState({ open: false, code: '' })} code={chartsState.code} themeVarsJson={mermaidVars} themeCss={mermaidCss} />
       <CodeRunDrawer open={runState.open} onClose={() => setRunState({ open: false, code: '', language: '' })} code={runState.code} language={runState.language} />
     </div>
   )
@@ -717,13 +722,14 @@ function limit<T>(arr: T[], n = 30) { return arr.length > n ? arr.slice(arr.leng
 function join(args: unknown[]) { return args.map((a) => (typeof a === 'string' ? a : safe(JSON.stringify(a)))).join(' ') }
 function safe(s: string) { try { return s } catch { return '[unserializable]' } }
 
-function scanLatestMermaid(md: string): string | null {
+// Scan for the last fully closed fenced code block in the string; returns the language and code
+function scanLatestRunnableCode(md: string): { lang: string; code: string } | null {
   if (!md) return null
   const lines = md.split(/\r?\n/)
   let inFence = false
   let lang = ''
   let buf: string[] = []
-  let last: string | null = null
+  let last: { lang: string; code: string } | null = null
   for (const line of lines) {
     const trimmed = line.trimStart()
     if (!inFence && trimmed.startsWith('```')) {
@@ -733,7 +739,8 @@ function scanLatestMermaid(md: string): string | null {
       continue
     }
     if (inFence && trimmed.startsWith('```')) {
-      if (lang === 'mermaid') last = buf.join('\n')
+      const code = buf.join('\n')
+      last = { lang: lang || 'js', code }
       inFence = false
       lang = ''
       buf = []
@@ -741,16 +748,12 @@ function scanLatestMermaid(md: string): string | null {
     }
     if (inFence) buf.push(line)
   }
-  return last
-}
-
-function tailSection(md: string): string {
-  if (!md) return ''
-  const thermIdx = md.lastIndexOf('\n\n### **Thermodynamic**\n\n')
-  if (thermIdx !== -1) return md.slice(thermIdx)
-  const youIdx = md.lastIndexOf('**You:**')
-  if (youIdx !== -1) return md.slice(youIdx)
-  return md
+  if (!last) return null
+  const l = last.lang
+  if (l === 'mermaid' || l === 'javascript' || l === 'js' || l === 'html' || l === 'python' || l === 'py' || l === 'perl' || l === 'pl') {
+    return last
+  }
+  return null
 }
 
 // (removed old regex-based extractor)

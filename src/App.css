@@ -139,6 +139,19 @@
   grid-template-rows: auto 1fr auto;
 }
 
+/* Left-side drawer variant for Mermaid */
+.drawer--left {
+  left: 0;
+  right: auto;
+  border-left: none;
+  border-right: 1px solid #ffffff;
+  outline: 1px solid #ffffff;
+}
+
+.drawer--mermaid {
+  background: #141414; /* slightly lighter than #0b0b0b */
+}
+
 .drawer__header {
   display: flex;
   align-items: center;
