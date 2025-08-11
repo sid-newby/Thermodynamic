@@ -39,8 +39,19 @@ export function CodeRunDrawer({
   // Do not boot on open; just attach to existing server if present
   useEffect(() => {
     if (!open) return
-    const url = getServerUrl()
-    if (url) setIframeUrl(urlWithBust(url + '/run'))
+    let stop = false
+    const tryAttach = async () => {
+      for (let i = 0; i < 50 && !stop; i++) {
+        const url = getServerUrl()
+        if (url) {
+          setIframeUrl(urlWithBust(url + '/run'))
+          return
+        }
+        await new Promise((r) => setTimeout(r, 100))
+      }
+    }
+    void tryAttach()
+    return () => { stop = true }
   }, [open])
 
   // Sync code changes

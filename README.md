@@ -10,15 +10,14 @@
  [x] React Markdown and Styling 
  [x] System Prompt Management in the UI 
  [x] Tavily web search 
- [x] Deepgram for TTS 
+ [x] Deepgram STT (WebSocket mic + hotword)
  [x] MCP Server
  [x] Bun API 
  [x] React Syntax Highlighting
  [x] Independent State for Web Containers - Fuck UseState / UseEffect for real. 
  [ ] Embedding with OpenAI and Supabase (text-embeddings-small @ 768dim)
  [ ] Multi-agent editors (Langgraph / Inspired by GPTResearcher)
- [ ] STT (Cartesia / Websockets)
- [x] Hot word STT when mic is toggled on 'Send it' ->
+ [x] STT (Deepgram WebSocket with hotword "send it")
  [ ] Tons of tuneup 
  [ ] Add more controls to UI Admin (Themes, Voice, MCP Loading)
 
@@ -210,6 +209,36 @@ Update the system prompt.
 }
 ```
 
+### `GET /api/mermaid-theme`
+Retrieve the current Mermaid theme configuration.
+
+**Response:**
+```json
+{
+  "theme": "Current Mermaid theme JSON/CSS"
+}
+```
+
+### `PUT /api/mermaid-theme`
+Update the Mermaid theme configuration.
+
+**Request:**
+```json
+{
+  "theme": "New Mermaid theme JSON/CSS"
+}
+```
+
+### `GET /api/deepgram-token`
+Obtain a temporary Deepgram API token for WebSocket connections.
+
+**Response:**
+```json
+{
+  "key": "temporary_deepgram_token"
+}
+```
+
 ## WebContainer Integration
 
 Thermodynamic uses WebContainers to provide secure, browser-based code execution environments. This requires:
@@ -248,10 +277,29 @@ The system supports Model Context Protocol (MCP) servers for extensible tool int
 ## Support
 
 For issues and questions:
-1. Check the [cartography documentation](./cartography/thermodynamic-codebase-map.md) for detailed technical information
+1. Check the [cartography documentation](./cartography/CARTOGRAPHY.md) for detailed technical information
 2. Review the codebase structure and component responsibilities
 3. Open an issue with detailed reproduction steps
 
 ---
 
 **Built with ❤️ using React, TypeScript, Bun, and Claude**
+
+
+
+
+
+```mermaid
+    
+    gantt
+    title A Gantt Diagram
+    dateFormat YYYY-MM-DD
+    section Section
+        A task          :a1, 2014-01-01, 30d
+        Another task    :after a1, 20d
+    section Another
+        Task in Another :2014-01-12, 12d
+        another task    :24d
+
+
+```

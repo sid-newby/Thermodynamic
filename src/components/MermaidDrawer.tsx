@@ -96,47 +96,76 @@ function buildMermaidSrcDoc(code: string, themeVarsJson: string, extraCss: strin
     <script id="mmd" type="text/plain">${cleaned.replace(/<\//g, '<\\/')}</script>
     <script type="module">
       import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-      let externalVars = {};
-      try { externalVars = JSON.parse(document.getElementById('theme-vars')?.textContent || '{}') } catch {}
-      const mermaidConfig = { startOnLoad: false, logLevel: 'fatal', securityLevel: 'loose', theme: 'base', themeVariables: externalVars };
-      mermaid.initialize(mermaidConfig);
-      const el = document.getElementById('root');
-      try {
-        const original = (document.getElementById('mmd')?.textContent || '').trim();
-        const MAX_TRIES = 4;
-        function normalize(src, attempt) {
-          try { src = String(src); } catch { return src; }
-          if (attempt === 0) return src;
-          if (attempt === 1) {
-            let out = src;
-            out = out.replace(/^\s*(flowchart|graph)\s+([A-Za-z]{2})\b\s*/i, function(_m, a, dir) { return String(a) + ' ' + String(dir) + '\n'; });
-            out = out.replace(/^\s*(sequenceDiagram|classDiagram|erDiagram|stateDiagram(?:-v2)?|journey|gantt)\b\s*/i, function(_m, t) { return String(t) + '\n'; });
-            return out;
+      (async () => {
+        let externalVars = {};
+        try { externalVars = JSON.parse(document.getElementById('theme-vars')?.textContent || '{}') } catch {}
+        const mermaidConfig = { startOnLoad: false, logLevel: 'fatal', securityLevel: 'loose', theme: 'base', themeVariables: externalVars };
+        mermaid.initialize(mermaidConfig);
+        const el = document.getElementById('root');
+        try {
+          const original = (document.getElementById('mmd')?.textContent || '').trim();
+          const firstLine = (original.split(/\r?\n/)[0] || '').trim();
+          const isArchitecture = /^architecture(?:-beta)?\b/i.test(firstLine);
+
+          // Attempt to load Architecture diagram plugin if needed
+          if (isArchitecture) {
+            const pluginUrls = [
+              'https://cdn.jsdelivr.net/npm/@mermaid-js/mermaid-architecture@latest/dist/architectureDiagramDefinition.esm.min.mjs',
+              'https://cdn.jsdelivr.net/npm/@mermaid-js/architecture@latest/dist/architectureDiagramDefinition.esm.min.mjs',
+            ];
+            let registered = false;
+            for (const u of pluginUrls) {
+              try {
+                const mod = await import(u);
+                const def = (mod && (mod.default || mod.diagram || mod.architecture || mod)) as any;
+                if (def && typeof mermaid.registerDiagram === 'function') {
+                  try { mermaid.registerDiagram('architecture', def); } catch {}
+                  try { mermaid.registerDiagram('architecture-beta', def); } catch {}
+                  registered = true;
+                  break;
+                }
+              } catch {}
+            }
+            if (!registered) {
+              el.textContent = 'Architecture diagram plugin not available in this environment. Try a flowchart or install @mermaid-js/mermaid-architecture.';
+              return;
+            }
           }
-          if (attempt === 2) {
-            return src.replace(/\s+(?=(style|linkStyle|classDef|click|subgraph|end)\b)/g, '\n').replace(/\s+--\>\s+/g, ' -->\n ');
+          const MAX_TRIES = 4;
+          function normalize(src, attempt) {
+            try { src = String(src); } catch { return src; }
+            if (attempt === 0) return src;
+            if (attempt === 1) {
+              let out = src;
+              out = out.replace(/^\s*(flowchart|graph)\s+([A-Za-z]{2})\b\s*/i, function(_m, a, dir) { return String(a) + ' ' + String(dir) + '\n'; });
+              out = out.replace(/^\s*(sequenceDiagram|classDiagram|erDiagram|stateDiagram(?:-v2)?|journey|gantt)\b\s*/i, function(_m, t) { return String(t) + '\n'; });
+              return out;
+            }
+            if (attempt === 2) {
+              return src.replace(/\s+(?=(style|linkStyle|classDef|click|subgraph|end)\b)/g, '\n').replace(/\s+--\>\s+/g, ' -->\n ');
+            }
+            if (attempt === 3) {
+              return src.replace(/;\s*/g, ';\n').replace(/(\])\s+(?=[A-Za-z][A-Za-z0-9_]*\s*(\[|--|==|:::|:))/g, '$1\n').replace(/\)\s+(?=[A-Za-z][A-Za-z0-9_]*\s*(\[|--|==|:::|:))/g, ')\n');
+            }
+            return src;
           }
-          if (attempt === 3) {
-            return src.replace(/;\s*/g, ';\n').replace(/(\])\s+(?=[A-Za-z][A-Za-z0-9_]*\s*(\[|--|==|:::|:))/g, '$1\n').replace(/\)\s+(?=[A-Za-z][A-Za-z0-9_]*\s*(\[|--|==|:::|:))/g, ')\n');
+          for (let i = 0; i < MAX_TRIES; i++) {
+            const attempt = normalize(original, i);
+            try {
+              const id = 'mmd-' + Math.random().toString(36).slice(2);
+              const { svg } = await mermaid.render(id, attempt);
+              if (!svg || String(svg).trim().length < 20) throw new Error('Empty SVG');
+              el.innerHTML = svg;
+              break;
+            } catch (err) {
+              console.error('[mermaid] render attempt', i, 'failed:', err);
+              if (i === MAX_TRIES - 1) { el.textContent = 'Failed to render: ' + (err?.message || err); }
+            }
           }
-          return src;
+        } catch (e) {
+          el.textContent = 'Failed to render: ' + (e?.message || e);
         }
-        for (let i = 0; i < MAX_TRIES; i++) {
-          const attempt = normalize(original, i);
-          try {
-            const id = 'mmd-' + Math.random().toString(36).slice(2);
-            const { svg } = await mermaid.render(id, attempt);
-            if (!svg || String(svg).trim().length < 20) throw new Error('Empty SVG');
-            el.innerHTML = svg;
-            break;
-          } catch (err) {
-            console.error('[mermaid] render attempt', i, 'failed:', err);
-            if (i === MAX_TRIES - 1) { el.textContent = 'Failed to render: ' + (err?.message || err); }
-          }
-        }
-      } catch (e) {
-        el.textContent = 'Failed to render: ' + (e?.message || e);
-      }
+      })();
     </script>
   </head>
   <body>

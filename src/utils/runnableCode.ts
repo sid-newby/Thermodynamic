@@ -18,7 +18,14 @@ export function scanLatestRunnableCode(md: string): RunnableDetection {
       continue
     }
     if (inFence && trimmed.startsWith('```')) {
-      const code = buf.join('\n')
+      let code = buf.join('\n')
+      // Strip any obvious non-HTML prologue lines when language is html
+      if (lang === 'html') {
+        const ls = code.split(/\r?\n/)
+        let i = 0
+        while (i < ls.length && !/^\s*</.test(ls[i] || '')) i++
+        code = ls.slice(i).join('\n')
+      }
       last = { lang: lang || 'js', code }
       inFence = false
       lang = ''

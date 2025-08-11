@@ -1,40 +1,55 @@
-// Markdown streaming helpers extracted from App.tsx
+// Markdown streaming helpers rewritten to avoid regex and prefer line scanning
 
 export function stabilizeMarkdownForStreaming(raw: string, isFinal: boolean): string {
-  let out = raw
-  // Balance fenced code blocks ```
-  const fenceMatches = out.match(/(^|\n)```/g)
-  if (fenceMatches && fenceMatches.length % 2 === 1 && !isFinal) {
-    out += '\n```'
+  const out = String(raw ?? '')
+  if (out.length === 0) return out
+  // Count code fences by scanning lines that start with ``` (ignoring indentation)
+  const lines = out.split(/\r?\n/)
+  let fenceCount = 0
+  for (const line of lines) {
+    const t = line.trimStart()
+    if (t.startsWith('```')) fenceCount++
   }
-  // Balance inline code backticks ` (ignore escaped \`)
-  const inlineMatches = out.match(/(?<!\\)`/g)
-  if (inlineMatches && inlineMatches.length % 2 === 1 && !isFinal) {
-    out += '`'
+  // If we have an unmatched opening fence during streaming, temporarily close it
+  if (!isFinal && fenceCount % 2 === 1) {
+    return out + '\n```'
   }
   return out
 }
 
-// Aggressively close any dangling fenced code blocks in the provided markdown
+// Close any dangling fenced code blocks by appending a single closing fence.
+// Avoids touching inline backticks entirely.
 export function hardCloseDanglingFences(md: string): string {
-  if (!md) return md
-  // Count fenced code ticks ``` occurrences not preceded by 4 backticks
-  const matches = md.match(/(^|\n)```/g)
-  if (matches && matches.length % 2 === 1) {
-    return md + '\n```\n'
+  const text = String(md ?? '')
+  if (text.length === 0) return text
+  const lines = text.split(/\r?\n/)
+  let fenceCount = 0
+  for (const line of lines) {
+    const t = line.trimStart()
+    if (t.startsWith('```')) fenceCount++
   }
-  // Also close inline single backticks if odd count at end of stream
-  const inline = md.match(/(?<!\\)`/g)
-  if (inline && inline.length % 2 === 1) {
-    return md + '`'
+  if (fenceCount % 2 === 1) {
+    return text + '\n```\n'
   }
-  return md
+  return text
 }
 
+// Remove a trailing final line that is only backticks (```...) at the very end.
 export function stripTrailingFence(md: string): string {
-  if (!md) return md
-  // Remove any trailing sequence of backticks at end or on the last line
-  return md.replace(/(```+\s*)+$/m, '').replace(/\n```+\s*$/m, '')
+  const text = String(md ?? '')
+  if (text.length === 0) return text
+  const lines = text.split(/\r?\n/)
+  let end = lines.length
+  while (end > 0) {
+    const t = lines[end - 1]?.trim()
+    if (t && t.startsWith('```') && t.replace(/`/g, '').length === 0) {
+      end--
+      continue
+    }
+    break
+  }
+  if (end === lines.length) return text
+  return lines.slice(0, end).join('\n')
 }
 
 

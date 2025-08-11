@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import "dotenv/config";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { scanLatestRunnableCode } from "./src/utils/runnableCode";
 // Bun global typing shim for editors without Bun types
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 declare const Bun: any;
@@ -271,6 +272,141 @@ Bun.serve({
   idleTimeout: IDLE_S,
   async fetch(req) {
     const url = new URL(req.url);
+    // --- Preprocess endpoint (pre-agent + heuristic) ---
+    if (req.method === "POST" && url.pathname === "/api/preprocess") {
+      try {
+        type PreprocessRoute = "mermaid" | "wc" | "surface";
+        type PreprocessResult = {
+          normalizedText: string;
+          route: PreprocessRoute;
+          language?: string;
+          code?: string;
+          fixesApplied?: string[];
+          safeToRun: boolean;
+          sendToModel: boolean;
+        };
+
+        const body = await req.json();
+        const text: string = String(body?.text || "");
+        const history = Array.isArray(body?.history) ? body.history : [];
+
+        const heuristic = (): PreprocessResult => {
+          const md = String(text);
+          const det = scanLatestRunnableCode(md);
+          if (det) {
+            const lang = det.lang.toLowerCase();
+            if (lang === "mermaid") {
+              return {
+                normalizedText: md,
+                route: "mermaid",
+                language: "mermaid",
+                code: det.code,
+                fixesApplied: [],
+                safeToRun: true,
+                sendToModel: true,
+              };
+            }
+            if (["js", "javascript", "html", "python", "py", "perl", "pl"].includes(lang)) {
+              return {
+                normalizedText: md,
+                route: "wc",
+                language: lang,
+                code: det.code,
+                fixesApplied: [],
+                safeToRun: true,
+                sendToModel: true,
+              };
+            }
+          }
+          return {
+            normalizedText: text,
+            route: "surface",
+            safeToRun: true,
+            sendToModel: true,
+          } as PreprocessResult;
+        };
+
+        const usePreAgent = (process.env.ENABLE_PRE_AGENT ?? "1").match(/^(1|true)$/i) != null;
+        const apiKey = process.env.OPENAI_API_KEY || "";
+        const model = process.env.PRE_AGENT_MODEL || "gpt-5-mini-2025-08-07";
+
+        if (!usePreAgent || !apiKey) {
+          const h = heuristic();
+          return new Response(JSON.stringify(h), { headers: { "Content-Type": "application/json" } });
+        }
+
+        // Small prompt to classify and repair if needed
+        const system = `You are a tiny preprocessing agent. Classify the user's text and optionally fix code fences.
+Return STRICT JSON with these fields only:
+{
+  "normalizedText": string,   // text to send to main model (may be original or lightly fixed)
+  "route": "mermaid"|"wc"|"surface",
+  "language": string|null,    // normalized language for code block if any
+  "code": string|null,        // normalized code body if any (no fences)
+  "fixesApplied": string[],   // brief notes like ["closed_fence", "normalized_mermaid_header"]
+  "safeToRun": boolean,       // true if safe to render/execute client-side
+  "sendToModel": boolean      // false if we should not send to LLM (e.g., pure visualization)
+}
+Rules:
+- Supported langs: mermaid, javascript|js, html, python|py, perl|pl.
+- Prefer mermaid route if the last CLOSED fenced block is language mermaid.
+- Prefer wc route for other supported langs with a CLOSED fence.
+- If fences are half-open, close minimally and set fixesApplied accordingly.
+- If nothing to route, pick surface.
+- Output JSON ONLY.`;
+
+        const payload = {
+          model,
+          input: [
+            { role: "system", content: system },
+            { role: "user", content: `TEXT:\n${text}\n\n` },
+          ],
+          text: { verbosity: "low" },
+          reasoning: { effort: "minimal" },
+        } as Record<string, unknown>;
+
+        let agentOut: any = null;
+        try {
+          const resp = await fetch("https://api.openai.com/v1/responses", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+          });
+          const json = await resp.json();
+          const textOut = (json?.output_text as string)
+            || (json?.content?.[0]?.text as string)
+            || (json?.choices?.[0]?.message?.content as string)
+            || "";
+          try {
+            agentOut = JSON.parse(textOut);
+          } catch {
+            agentOut = null;
+          }
+        } catch {
+          agentOut = null;
+        }
+
+        const result = (() => {
+          const base = heuristic();
+          if (!agentOut || typeof agentOut !== "object") return base;
+          const route = (agentOut.route === "mermaid" || agentOut.route === "wc" || agentOut.route === "surface") ? agentOut.route : base.route;
+          const normalizedText = typeof agentOut.normalizedText === "string" ? agentOut.normalizedText : base.normalizedText;
+          const language = typeof agentOut.language === "string" ? agentOut.language : base.language;
+          const code = typeof agentOut.code === "string" ? agentOut.code : base.code;
+          const fixesApplied = Array.isArray(agentOut.fixesApplied) ? agentOut.fixesApplied.filter((x: unknown) => typeof x === "string") : base.fixesApplied || [];
+          const safeToRun = typeof agentOut.safeToRun === "boolean" ? agentOut.safeToRun : base.safeToRun;
+          const sendToModel = typeof agentOut.sendToModel === "boolean" ? agentOut.sendToModel : base.sendToModel;
+          return { normalizedText, route, language, code, fixesApplied, safeToRun, sendToModel } as PreprocessResult;
+        })();
+
+        return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e?.message || String(e) }), { status: 500, headers: { "Content-Type": "application/json" } });
+      }
+    }
     // Expose Deepgram key for browser WebSocket auth (dev-only). Do NOT use this in production as-is.
     if (req.method === "GET" && url.pathname === "/api/deepgram-token") {
       const key = process.env.DEEPGRAM_API_KEY || "";
@@ -409,7 +545,16 @@ Bun.serve({
 
             (async () => {
               try {
-                const msgsBase: Array<any> = [...priorMessages, { role: "user", content: [{ type: "text", text }] }];
+                // Avoid duplicating the latest user message if it's already the last item in history
+                const normalizedText = String(text || "").trim();
+                let msgsBase: Array<any> = priorMessages.slice();
+                const last = msgsBase[msgsBase.length - 1];
+                const lastText = Array.isArray(last?.content)
+                  ? String(last.content.find((c: any) => c?.type === "text")?.text || "").trim()
+                  : "";
+                if (!(last?.role === "user" && lastText === normalizedText)) {
+                  msgsBase.push({ role: "user", content: [{ type: "text", text }] });
+                }
                 if (!auto) {
                   const textOut = await runOne(msgsBase);
                   if (!closed) controller.enqueue(encoder(`data: ${JSON.stringify({ type: "done" })}\n\n`));

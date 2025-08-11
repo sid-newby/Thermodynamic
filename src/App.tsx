@@ -93,10 +93,7 @@ export default function App() {
 
   useEffect(() => { autoResize() }, [input])
   useEffect(() => { autoResize() }, [])
-  // Boot the shared container ASAP so routes are ready before any drawer opens
-  useEffect(() => {
-    void bootWC()
-  }, [])
+  // Lazy boot WebContainers on demand (removed eager boot)
   function autoResize() {
     const el = taRef.current; if (!el) return
     const cs = getComputedStyle(el)
@@ -174,6 +171,8 @@ export default function App() {
   }, [])
 
   async function onSend(forcedText?: string) {
+  const sendingRef = (onSend as any)._sendingRef || ((onSend as any)._sendingRef = { current: false })
+  if (sendingRef.current) return
   // Before starting a new turn, strip any trailing fence ticks from the end of the accumulated buffer
   if (rawMdRef.current) {
     const stripped = stripTrailingFence(rawMdRef.current)
@@ -184,6 +183,7 @@ export default function App() {
   }
     const textToSend = forcedText ?? input
     if (textToSend.trim().length === 0 || isLoading) return
+    sendingRef.current = true
     setIsLoading(true)
     // Keep mic running for continuous capture
     const userText = textToSend
@@ -198,13 +198,53 @@ export default function App() {
     try {
       console.log('[send]', userText)
       const recentHistory = updatedHistory.slice(-10)
-      const res = await fetch('/api/message', {
+      // Optional pre-agent preprocessing
+      let pre: any = null
+      try {
+        const p = await fetch('/api/preprocess', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: userText, history: recentHistory }),
+        })
+        if (p.ok) pre = await p.json()
+      } catch { /* ignore */ }
+
+      // Route based on pre-agent decision if present
+      if (pre && pre.safeToRun) {
+        if (pre.route === 'mermaid') {
+          const code = typeof pre.code === 'string' && pre.code.trim() ? pre.code : (scanLatestRunnableCode(userText)?.code || '')
+          if (code) {
+            setMessages((prev) => [...prev, { role: 'assistant', text: '```mermaid\n' + code + '\n```' }])
+            setChartsState({ open: true, code })
+          }
+        } else if (pre.route === 'wc') {
+          // Prefer extracting from the original message to avoid stray prose
+          const det = scanLatestRunnableCode(userText)
+          let lang = (det?.lang || pre.language || '').toString()
+          let code = (det?.code || pre.code || '').toString()
+          // HTML hygiene: drop any leading non-HTML lines before first '<'
+          const isHtmlLike = lang === 'html' || code.trim().startsWith('<!doctype') || code.trim().startsWith('<html')
+          if (isHtmlLike) {
+            const lines = code.split(/\r?\n/)
+            let start = 0
+            while (start < lines.length && !/^\s*</.test(lines[start] || '')) start++
+            code = lines.slice(start).join('\n')
+            lang = 'html'
+          }
+          if (code.trim()) {
+            void writeRunSnippet(lang || 'js', code)
+            setRunState({ open: true, code, language: lang || 'js' })
+          }
+        }
+      }
+
+      const toModel = pre?.sendToModel !== false
+      const res = toModel ? await fetch('/api/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: userText, history: recentHistory }),
-      })
-      if (!res.body) throw new Error('No stream')
-      const reader = res.body.getReader()
+        body: JSON.stringify({ text: (pre?.normalizedText ?? userText), history: recentHistory }),
+      }) : null
+      if (toModel && !res?.body) throw new Error('No stream')
+      const reader = toModel ? res!.body!.getReader() : null
       const decoder = new TextDecoder()
       let buf = ''
       setInput('')
@@ -246,6 +286,7 @@ export default function App() {
         }
       }
       for (; ;) {
+        if (!reader) break
         const { value, done } = await reader.read()
         if (done) break
         buf += decoder.decode(value, { stream: true })
@@ -285,6 +326,7 @@ export default function App() {
       console.error(e?.message || String(e))
     } finally {
       setIsLoading(false)
+      sendingRef.current = false
     }
   }
 
@@ -391,7 +433,7 @@ export default function App() {
       <header className="app__header">
         <div className="app__title">Thermodynamic</div>
         <div className="header__actions">
-          <button className="icon-btn" aria-label="WebContainers" onClick={() => setRunState((s) => ({ ...s, open: !s.open }))}>
+          <button className="icon-btn" aria-label="WebContainers" onClick={() => { void bootWC(); setRunState((s) => ({ ...s, open: !s.open })) }}>
             <Box size={16} />
           </button>
           <button className="icon-btn" aria-label="Settings" onClick={() => setDrawerOpen(true)}>⚙️</button>

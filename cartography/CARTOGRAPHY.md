@@ -20,13 +20,13 @@ This document maps the current codebase structure, components, dependencies, dat
     - Responsibilities:
       - Markdown streaming and rendering ([onSend()](src/App.tsx:168), helpers in [src/utils/markdownStream.ts](src/utils/markdownStream.ts))
       - Runnable code detection ([scanLatestRunnableCode()](src/utils/runnableCode.ts))
-      - Meraki console ticker (log capture) ([useEffect](src/App.tsx:50))
-      - Microphone capture and Deepgram websocket ([toggleMic()](src/App.tsx:300), [stopMic()](src/App.tsx:417), [chooseOpusMime()](src/App.tsx:450))
-      - Settings drawer (system prompt, Mermaid theme saving) (UI in [src/App.tsx](src/App.tsx:599-675))
-      - Drawer orchestration for Mermaid and code run (UI in [src/App.tsx](src/App.tsx:677-680))
+      - Meraki console ticker (log capture)
+      - Microphone capture and Deepgram websocket ([useMicStreaming()](src/hooks/useMicStreaming.ts))
+      - Settings drawer (system prompt, Mermaid theme saving)
+      - Drawer orchestration for Mermaid and code run
     - External IO:
-      - HTTP: /api/system-prompt, /api/mermaid-theme, /api/message ([src/App.tsx](src/App.tsx:113-156), [src/App.tsx](src/App.tsx:193-197))
-      - WS: wss://api.deepgram.com/v1/listen (dynamic query) ([src/App.tsx](src/App.tsx:321-334))
+      - HTTP: /api/system-prompt, /api/mermaid-theme, /api/message, /api/deepgram-token
+      - WS: wss://api.deepgram.com/v1/listen (dynamic query) via [useMicStreaming()](src/hooks/useMicStreaming.ts)
 - Drawers
   - [src/components/MermaidDrawer.tsx](src/components/MermaidDrawer.tsx) — 291 LOC
     - Live Mermaid rendering inside an iframe using srcDoc.
@@ -62,7 +62,7 @@ This document maps the current codebase structure, components, dependencies, dat
   - React, Framer Motion, React Markdown + remark-gfm, react-syntax-highlighter + prism theme, lucide-react.
   - Mermaid (CDN within drawers and WC environment).
   - WebContainers API.
-  - Deepgram SDK used in API process (key retrieval) and client uses WS endpoint.
+  - Deepgram integration: server exposes token endpoint, client uses raw WebSocket connection.
 
 Mermaid diagram of core relationships:
 
@@ -81,35 +81,36 @@ flowchart TD
 ## Data Flow Documentation
 
 - Message streaming
-  - Trigger: [onSend()](src/App.tsx:168) POSTs to /api/message with recent history.
+  - Trigger: [onSend()](src/App.tsx) POSTs to /api/message with recent history.
   - Streaming: Reads SSE-like chunks, buffers, schedules UI flush.
   - Finalization: Ensures balanced fences via [markdownStream](src/utils/markdownStream.ts).
-  - History append: On done, assistant text added to history ([src/App.tsx](src/App.tsx:270-272)).
+  - History append: On done, assistant text added to history.
 - Runnable code detection
   - Detection: [scanLatestRunnableCode()](src/utils/runnableCode.ts) scans last closed fenced block.
-  - Reaction: If "mermaid", open Mermaid drawer; else write snippet to WC and open Run drawer ([src/App.tsx](src/App.tsx:62-82), [src/App.tsx](src/App.tsx:73-79)).
+  - Reaction: If "mermaid", open Mermaid drawer; else write snippet to WC and open Run drawer.
 - WebContainers
-  - Boot: [bootWC()](src/wc.ts:18) on app mount ([src/App.tsx](src/App.tsx:89-91)).
+  - Boot: [bootWC()](src/wc.ts:18) on app mount.
   - Server-ready event sets serverUrl; WC serves /charts and /run ([UNIFIED_SERVER_JS](src/wc.ts:170)).
   - Writers: [writeRunSnippet()](src/wc.ts:85) routes by language to appropriate files ([writeFilesForLanguage()](src/wc.ts:97)).
 - Mermaid rendering
   - In-drawer srcDoc builds page with Mermaid CDN, attempts normalization and render with retries ([buildMermaidSrcDoc()](src/components/MermaidDrawer.tsx:70)).
   - Radar-beta custom mode renders via ECharts ([buildRadarSrcDoc()](src/components/MermaidDrawer.tsx:150)).
 - Microphone and ASR
-  - Toggle mic: [useMicStreaming()](src/hooks/useMicStreaming.ts)
+  - Microphone lifecycle: [useMicStreaming()](src/hooks/useMicStreaming.ts)
   - getUserMedia and Deepgram WS handled inside the hook; hotword "send it" triggers `onSend()` via callback.
+  - Token retrieval: GET /api/deepgram-token provides temporary key for browser WebSocket connection.
 
 Storage and persistence:
-- localStorage: "systemPrompt" cached/updated ([src/App.tsx](src/App.tsx:111-118), [saveSystemPrompt()](src/App.tsx:132))
-- Mermaid theme variables and CSS saved server-side via PUT ([saveMermaidTheme()](src/App.tsx:148))
+- localStorage: "systemPrompt" cached/updated
+- Mermaid theme variables and CSS saved server-side via PUT
 
 ## Integration Documentation
 
 - Backend endpoints (proxied to :3000)
-  - GET/PUT /api/system-prompt — load/save system prompt ([src/App.tsx](src/App.tsx:113-146))
-  - GET/PUT /api/mermaid-theme — load/save Mermaid theme ([src/App.tsx](src/App.tsx:120-125), [src/App.tsx](src/App.tsx:148-159))
-  - POST /api/message — stream assistant response ([src/App.tsx](src/App.tsx:193-201))
-  - GET /api/deepgram-token — obtain token for live WS ([src/App.tsx](src/App.tsx:307-310))
+  - GET/PUT /api/system-prompt — load/save system prompt
+  - GET/PUT /api/mermaid-theme — load/save Mermaid theme
+  - POST /api/message — stream assistant response
+  - GET /api/deepgram-token — obtain token for live WS
 - Dev server headers for COOP/COEP (WebContainers):
   - [vite.config.ts](vite.config.ts:8-11), [vite.config.ts](vite.config.ts:21-24)
 - Build and run
@@ -133,9 +134,9 @@ Storage and persistence:
     - Markdown renderer components and code-run controls: [mdComponents.code](src/App.tsx:477-531) and footer button handlers ([src/App.tsx](src/App.tsx:507-526))
     - Settings drawer UI and save handlers: ([src/App.tsx](src/App.tsx:599-675)), [saveSystemPrompt()](src/App.tsx:132-146), [saveMermaidTheme()](src/App.tsx:148-159)
   - Neutral observation for reliability:
-    - Extracting mic/WS lifecycle into a dedicated module (e.g., [useMicStreaming()](src/App.tsx:300)) would reduce event listener/register/unregister complexity inside the render component and lower the risk of leaks affecting UI responsiveness.
-    - Moving Markdown stream utilities ([hardCloseDanglingFences()](src/App.tsx:700), [stripTrailingFence()](src/App.tsx:715), [stabilizeMarkdownForStreaming()](src/App.tsx:684)) into a small helper module could make streaming state updates more predictable and testable, reducing regressions in fence handling that can disrupt code detection.
-    - Relocating runnable code detection ([scanLatestRunnableCode()](src/App.tsx:725)) into a pure utility would reduce coupling between message state and action triggers, lowering the chance of drawer misfires under high-frequency updates.
+    - Mic/WS lifecycle has been extracted into [useMicStreaming()](src/hooks/useMicStreaming.ts), reducing event listener complexity in the main component and lowering the risk of leaks affecting UI responsiveness.
+    - Markdown stream utilities have been extracted to [src/utils/markdownStream.ts](src/utils/markdownStream.ts), making streaming state updates more predictable and testable.
+    - Runnable code detection has been extracted to [scanLatestRunnableCode()](src/utils/runnableCode.ts), reducing coupling between message state and action triggers.
 - WebContainers lifecycle
   - [bootWC()](src/wc.ts:18) centralizes WC boot with a cached bootPromise and COEP 'credentialless'. Neutral observation: maintaining WC boot and server readiness in an isolated module (already done in [src/wc.ts](src/wc.ts)) supports predictable performance and avoids duplicate boots when drawers open concurrently.
 - claude.ts uses `any` :(! and broad types, triggering @typescript-eslint/no-explicit-any.
@@ -145,10 +146,11 @@ Storage and persistence:
 ## Quick Reference
 
 - Common tasks
-  - Add runnable JS/HTML/Python snippet: Post a Markdown reply containing a fenced block (```js / ```html / ```python). App will detect and open the appropriate drawer automatically ([scanLatestRunnableCode()](src/App.tsx:725), [src/App.tsx](src/App.tsx:62-82)).
-  - Render Mermaid: Use ```mermaid fenced block. Mermaid drawer opens with live preview ([src/App.tsx](src/App.tsx:73-76), [src/components/MermaidDrawer.tsx](src/components/MermaidDrawer.tsx)).
-  - Update system prompt: Use Settings drawer; changes persist via PUT ([saveSystemPrompt()](src/App.tsx:132), [src/App.tsx](src/App.tsx:621-667)).
-  - Customize Mermaid theme: Settings drawer JSON/CSS, then Save Theme ([saveMermaidTheme()](src/App.tsx:148), [src/App.tsx](src/App.tsx:639-666)).
+  - Add runnable JS/HTML/Python snippet: Post a Markdown reply containing a fenced block (```js / ```html / ```python). App will detect and open the appropriate drawer automatically via [scanLatestRunnableCode()](src/utils/runnableCode.ts).
+  - Render Mermaid: Use ```mermaid fenced block. Mermaid drawer opens with live preview ([src/components/MermaidDrawer.tsx](src/components/MermaidDrawer.tsx)).
+  - Update system prompt: Use Settings drawer; changes persist via PUT.
+  - Customize Mermaid theme: Settings drawer JSON/CSS, then Save Theme.
+  - Voice input: Toggle microphone for speech-to-text with hotword "send it" via [useMicStreaming()](src/hooks/useMicStreaming.ts).
 - Key files
   - App shell: [src/App.tsx](src/App.tsx)
   - WC manager: [src/wc.ts](src/wc.ts)

@@ -82,12 +82,36 @@ export async function writeMermaidCode(code: string): Promise<string | null> {
   return window.__WC__?.serverUrl || url
 }
 
+// Simple in-tab write queue to serialize file writes and avoid races
+const writeQueue: Array<() => Promise<void>> = []
+let running = false
+async function enqueueWrite(task: () => Promise<void>): Promise<void> {
+  return new Promise((resolve) => {
+    writeQueue.push(async () => { try { await task() } finally { resolve() } })
+    if (!running) {
+      running = true
+      ;(async () => {
+        try {
+          while (writeQueue.length > 0) {
+            const t = writeQueue.shift()
+            if (t) await t()
+          }
+        } finally {
+          running = false
+        }
+      })()
+    }
+  })
+}
+
 export async function writeRunSnippet(language: string, code: string): Promise<string | null> {
   const url = await bootWC()
   const wc = window.__WC__?.wc
   if (!wc) return url
   try {
-    await writeFilesForLanguage(wc, language, code)
+    await enqueueWrite(async () => {
+      await writeFilesForLanguage(wc, language, code)
+    })
   } catch (e) {
     console.error('[wc] run write error', e)
   }
