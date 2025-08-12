@@ -68,8 +68,8 @@ function buildAnySrcDoc(code: string, themeVarsJson: string, extraCss: string): 
 }
 
 function buildMermaidSrcDoc(code: string, themeVarsJson: string, extraCss: string): string {
-  // Strip any init directive
-  const cleaned = code.replace(/^%%\{init[\s\S]*?\}%%\s*/m, '').trim()
+  // Normalize source: remove fences, YAML front matter, init directives
+  const cleaned = normalizeMermaidSource(code)
   const safeVars = themeVarsJson && themeVarsJson.trim() ? themeVarsJson : '{}'
   const cssBlock = extraCss && extraCss.trim().length > 0 ? `\n/* Extra custom CSS */\n${extraCss}\n` : ''
   return `<!doctype html>
@@ -174,6 +174,24 @@ function buildMermaidSrcDoc(code: string, themeVarsJson: string, extraCss: strin
     </div>
   </body>
   </html>`
+}
+
+function normalizeMermaidSource(raw: string): string {
+  let src = String(raw || '')
+  // Remove surrounding fenced code blocks if present
+  // Matches ```mermaid ... ``` or generic ``` ... ``` at start/end
+  const fenceMatch = src.match(/^```[ \t]*([a-zA-Z0-9_-]+)?[ \t]*\n([\s\S]*?)\n```[ \t]*$/m)
+  if (fenceMatch) {
+    src = fenceMatch[2]
+  } else {
+    // Fallback: strip any fence lines inside
+    src = src.replace(/(^|\n)```[ \t]*[a-zA-Z0-9_-]*[ \t]*\n/g, '$1').replace(/\n```[ \t]*$/g, '\n')
+  }
+  // Remove YAML front matter at very top: --- ... ---
+  src = src.replace(/^---\s*[\r\n]+[\s\S]*?[\r\n]+---\s*/m, '')
+  // Strip any Mermaid init directive
+  src = src.replace(/^%%\{init[\s\S]*?\}%%\s*/m, '')
+  return src.trim()
 }
 
 function buildRadarSrcDoc(code: string, extraCss: string): string {
